@@ -27,7 +27,7 @@
 
 var canvas = document.getElementById('c');
 var ctx = canvas.getContext('2d');
-var W, H, CELL = 10, GAP = 1, STEP = CELL + GAP;
+var W, H, CELL = 10, GAP = 0, STEP = CELL + GAP;
 var displayCols, displayRows;
 
 // ============================================================
@@ -455,35 +455,98 @@ function activateGyro() {
 gyroBtn.addEventListener('click', function (e) { e.stopPropagation(); activateGyro(); });
 gyroBtn.addEventListener('touchend', function (e) { e.preventDefault(); e.stopPropagation(); activateGyro(); });
 
-// ---- Touch ----
-function addAt(sx, sy) {
-  var x = sx / W * simW, y = sy / H * simH;
-  var gLen = Math.sqrt(gx * gx + gy * gy) || 1;
-  var dirX = gx / gLen, dirY = (gy || 5) / gLen;
-  for (var i = 0; i < 4; i++) {
-    var speed = 2 + Math.random() * 4;
-    var vx = dirX * speed + (Math.random() - 0.5) * 3;
-    var vy = dirY * speed + (Math.random() - 0.5) * 3;
-    var nx = x + (Math.random() - 0.5) * 1.2;
-    var ny = y + (Math.random() - 0.5) * 1.2;
-    var slot;
-    if (nP >= maxP) {
-      slot = Math.floor(Math.random() * nP * 0.2);
-    } else {
-      slot = nP; nP++;
+// ---- Touch/mouse → control gravity direction ----
+var dragActive = false;
+var dragStartX = 0, dragStartY = 0;
+var baseGx = 0, baseGy = 12;
+
+function updateGravityFromDrag(sx, sy) {
+  var dx = (sx - W * 0.5) / (W * 0.5);
+  var dy = (sy - H * 0.5) / (H * 0.5);
+  gx = dx * 18;
+  gy = clamp(dy * 18 + 6, 1, 26);
+}
+
+canvas.addEventListener('touchstart', function (e) {
+  e.preventDefault();
+  dragActive = true;
+  updateGravityFromDrag(e.touches[0].clientX, e.touches[0].clientY);
+});
+canvas.addEventListener('touchmove', function (e) {
+  e.preventDefault();
+  if (dragActive) updateGravityFromDrag(e.touches[0].clientX, e.touches[0].clientY);
+});
+canvas.addEventListener('touchend', function (e) {
+  e.preventDefault();
+  dragActive = false;
+  if (!gyroActive) { gx = 0; gy = 12; }
+});
+canvas.addEventListener('mousedown', function (e) {
+  dragActive = true;
+  updateGravityFromDrag(e.clientX, e.clientY);
+});
+canvas.addEventListener('mousemove', function (e) {
+  if (dragActive) updateGravityFromDrag(e.clientX, e.clientY);
+});
+canvas.addEventListener('mouseup', function () {
+  dragActive = false;
+  if (!gyroActive) { gx = 0; gy = 12; }
+});
+
+// ---- Weather & appearance (controllable) ----
+var weather = {
+  rainRate: 0,        // particles per frame from top (0 = no rain)
+  drainRate: 0.5,     // particles per frame removed from bottom
+  maxRatio: 0.5,      // max water particles as fraction of capacity
+  minRatio: 0.1,      // min water particles as fraction of capacity
+};
+
+var appearance = {
+  r: 91, g: 163, b: 181,  // water color (default: 5ba3b5)
+  glow: 0.3,               // glow intensity 0-1
+};
+
+var maxWater = maxP - 200;  // leave headroom
+
+function applyWeather() {
+  var waterMax = Math.floor(maxWater * weather.maxRatio);
+  var waterMin = Math.floor(maxWater * weather.minRatio);
+
+  // rain: add from top
+  if (weather.rainRate > 0 && nP < waterMax) {
+    var toAdd = Math.min(weather.rainRate, waterMax - nP);
+    for (var i = 0; i < toAdd; i++) {
+      if (nP >= maxP) break;
+      px[nP] = 1.5 + Math.random() * (simW - 3);
+      py[nP] = 1.5 + Math.random() * 0.5;
+      pvx[nP] = (Math.random() - 0.5) * 0.5;
+      pvy[nP] = 2 + Math.random() * 3;
+      nP++;
     }
-    px[slot] = clamp(nx, 1 + pRadius, simW - 1 - pRadius);
-    py[slot] = clamp(ny, 1 + pRadius, simH - 1 - pRadius);
-    pvx[slot] = vx; pvy[slot] = vy;
+  }
+
+  // drain: remove lowest particles
+  if (weather.drainRate > 0 && nP > waterMin) {
+    var toDrain = Math.min(Math.ceil(weather.drainRate), nP - waterMin);
+    // find the lowest particles (highest y)
+    for (var d = 0; d < toDrain; d++) {
+      var lowestIdx = -1, lowestY = -1;
+      for (var i = 0; i < nP; i++) {
+        if (py[i] > lowestY) { lowestY = py[i]; lowestIdx = i; }
+      }
+      if (lowestIdx >= 0 && lowestY > simH - 2) {
+        // swap with last and shrink
+        nP--;
+        if (lowestIdx < nP) {
+          px[lowestIdx] = px[nP]; py[lowestIdx] = py[nP];
+          pvx[lowestIdx] = pvx[nP]; pvy[lowestIdx] = pvy[nP];
+        }
+      }
+    }
   }
 }
-canvas.addEventListener('touchstart', function (e) { e.preventDefault(); for (var i = 0; i < e.touches.length; i++) addAt(e.touches[i].clientX, e.touches[i].clientY); });
-canvas.addEventListener('touchmove',  function (e) { e.preventDefault(); for (var i = 0; i < e.touches.length; i++) addAt(e.touches[i].clientX, e.touches[i].clientY); });
-canvas.addEventListener('mousedown',  function (e) { addAt(e.clientX, e.clientY); });
-canvas.addEventListener('mousemove',  function (e) { if (e.buttons === 1) addAt(e.clientX, e.clientY); });
 
 // ---- Render ----
-var waterColors = ['#4a7c8f', '#5194a8', '#5ba3b5', '#68b0c0', '#7cc4d4'];
 var occ = null;
 
 function render() {
@@ -502,13 +565,27 @@ function render() {
       occ[dr * displayCols + dc]++;
   }
 
+  var cr = appearance.r, cg = appearance.g, cb = appearance.b;
+  var glowAmt = appearance.glow;
+
   for (var r = 0; r < displayRows; r++) {
     for (var c = 0; c < displayCols; c++) {
       var k = occ[r * displayCols + c];
       if (k > 0) {
-        var ci = (r * 7 + c * 13) % waterColors.length;
-        ctx.globalAlpha = Math.min(1, k * 0.35 + 0.35);
-        ctx.fillStyle = waterColors[ci];
+        var alpha = Math.min(1, k * 0.35 + 0.35);
+
+        // glow: draw a larger, dimmer rect behind
+        if (glowAmt > 0) {
+          var glowSize = CELL + 4;
+          var glowOffset = (glowSize - CELL) * 0.5;
+          ctx.globalAlpha = alpha * glowAmt * 0.3;
+          ctx.fillStyle = 'rgb(' + cr + ',' + cg + ',' + cb + ')';
+          ctx.fillRect(c * STEP - glowOffset, r * STEP - glowOffset, glowSize, glowSize);
+        }
+
+        // main cell
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = 'rgb(' + cr + ',' + cg + ',' + cb + ')';
         ctx.fillRect(c * STEP, r * STEP, CELL, CELL);
       }
     }
@@ -517,6 +594,7 @@ function render() {
 }
 
 function loop() {
+  applyWeather();
   simulate();
   render();
   requestAnimationFrame(loop);
