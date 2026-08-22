@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>雨</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<style>
+  * { margin: 0; padding: 0; }
+  body {
+    background: #0a0e17;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #gyro-btn {
+    position: fixed; bottom: 15%; left: 50%; transform: translateX(-50%);
+    background: rgba(91,163,181,0.15); border: 1px solid rgba(91,163,181,0.4);
+    color: rgba(138,208,223,0.8); font-size: 14px; padding: 10px 24px;
+    border-radius: 4px; cursor: pointer; z-index: 10; transition: opacity 0.6s;
+    font-family: -apple-system, sans-serif;
+  }
+</style>
+<canvas id="c"></canvas>
+<div id="gyro-btn">启用陀螺仪</div>
+<script>
+'use strict';
+
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d');
+var W, H, CELL = 10, GAP = 1, STEP = CELL + GAP;
+var displayCols, displayRows;
+
+// ============================================================
+// FLIP fluid — following the step order in lib.rs:
+//   integrate -> pushApart -> collide -> pushApart -> collide
+//   -> transferToGrid -> updateParticleDensity
+//   -> solveIncompressibility -> extrapolate -> transferToParticles
+// ============================================================
+
+// --- grid ---
+var h = 1.0;                 // cell size (sim units)
+var simW, simH, numCells;
+var u, v, prevU, prevV, wU, wV, s, cellType, particleDensity;
+var FLUID = 0, AIR = 1, SOLID = 2;
+
+// --- solver params ---
+var dt = 1 / 60;
+var numPressureIters = 30;
+var numParticleIters = 2;
+var overRelax = 1.9;
+var flipRatio = 0.9;
+var compensateDrift = true;
+var driftK = 1.0;
+
+// --- particles ---
+var maxP = 3000;
+var nP = 0;
+var px = new Float32Array(maxP);
+var py = new Float32Array(maxP);
+var pvx = new Float32Array(maxP);
+var pvy = new Float32Array(maxP);
+
+// particle radius is now tied to the seeding spacing (lib.rs: r = 0.3*h, dx = 2r)
+var pRadius = 0.3 * h;
+var minDist = 2.0 * pRadius;
+var pInvSpacing = 1.0 / (2.2 * pRadius);
+var pNumX, pNumY, pNumCells;
+var numCellParticles, firstCellParticle, cellParticleIds;
+
+// rest density is measured once, on the first frame, from the seeded state
+var particleRestDensity = 0.0;
+
+// safety clamp only — with the prevU fix this should almost never fire
+var MAX_SPEED = 20.0;
+
+function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
+
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W; canvas.height = H;
+  displayCols = Math.max(1, Math.floor(W / STEP));
+  displayRows = Math.max(1, Math.floor(H / STEP));
+
+  // keep cell count roughly constant, match the screen aspect so the
+  // fluid isn't stretched
+  var targetCells = 950;
+  var aspect = displayCols / displayRows;
+  simH = Math.max(12, Math.round(Math.sqrt(targetCells / aspect)));
+  simW = Math.max(12, Math.round(simH * aspect));
+
+  initSimBuffers();
+}
+
+function initSimBuffers() {
+  numCells = simW * simH;
+  u = new Float32Array(numCells);
+  v = new Float32Array(numCells);
+  prevU = new Float32Array(numCells);
+  prevV = new Float32Array(numCells);
+  wU = new Float32Array(numCells);
+  wV = new Float32Array(numCells);
+  s = new Float32Array(numCells);
+  cellType = new Int32Array(numCells);
+  particleDensity = new Float32Array(numCells);
+
+  for (var i = 0; i < simW; i++)
+    for (var j = 0; j < simH; j++)
+      s[i + j * simW] = (i === 0 || i === simW - 1 || j === 0 || j === simH - 1) ? 0 : 1;
+
+  // counting-sort acceleration grid for pushApart (lib.rs style, zero alloc per frame)
+  pNumX = Math.floor(simW * pInvSpacing) + 1;
+  pNumY = Math.floor(simH * pInvSpacing) + 1;
+  pNumCells = pNumX * pNumY;
+  numCellParticles = new Int32Array(pNumCells);
+  firstCellParticle = new Int32Array(pNumCells + 1);
+  cellParticleIds = new Int32Array(maxP);
+
+  particleRestDensity = 0.0;
+  seed();
+}
+
+// seed on a staggered lattice with dx = 2r, dy = sqrt(3)/2*dx — this is what
+// makes the measured rest density consistent with minDist
+function seed() {
+  nP = 0;
+  var dx = 2.0 * pRadius;
+  var dy = Math.sqrt(3.0) / 2.0 * dx;
+  var minX = 1.0 + pRadius, maxX = (simW - 1) - pRadius;
+  var minY = 1.0 + pRadius, maxY = (simH - 1) - pRadius;
+  var startY = minY + (maxY - minY) * 0.55;
+
+  var row = 0;
+  for (var y = startY; y <= maxY; y += dy, row++) {
+    for (var x = minX + (row % 2 ? pRadius : 0); x <= maxX; x += dx) {
+      if (nP >= maxP - 200) return;   // headroom for touch-added drops
+      px[nP] = x; py[nP] = y;
+      pvx[nP] = 0; pvy[nP] = 0;
+      nP++;
+    }
+  }
+}
+
+var gx = 0, gy = 12;
+
+// ---- 1. integrate ----
+function integrateParticles(sdt) {
+  for (var i = 0; i < nP; i++) {
+    pvx[i] += sdt * gx;
+    pvy[i] += sdt * gy;
+    px[i] += pvx[i] * sdt;
+    py[i] += pvy[i] * sdt;
+  }
+}
+
+// ---- 2. push apart (counting sort, no per-frame allocation) ----
+function pushParticlesApart(numIters) {
+  numCellParticles.fill(0);
+
+  var i, xi, yi, cellNr;
+  for (i = 0; i < nP; i++) {
+    xi = clamp(Math.floor(px[i] * pInvSpacing), 0, pNumX - 1);
+    yi = clamp(Math.floor(py[i] * pInvSpacing), 0, pNumY - 1);
+    numCellParticles[xi * pNumY + yi]++;
+  }
+
+  var first = 0;
+  for (i = 0; i < pNumCells; i++) {
+    first += numCellParticles[i];
+    firstCellParticle[i] = first;
+  }
+  firstCellParticle[pNumCells] = first;
+
+  for (i = 0; i < nP; i++) {
+    xi = clamp(Math.floor(px[i] * pInvSpacing), 0, pNumX - 1);
+    yi = clamp(Math.floor(py[i] * pInvSpacing), 0, pNumY - 1);
+    cellNr = xi * pNumY + yi;
+    firstCellParticle[cellNr]--;
+    cellParticleIds[firstCellParticle[cellNr]] = i;
+  }
+
+  var minDist2 = minDist * minDist;
+
+  for (var iter = 0; iter < numIters; iter++) {
+    for (i = 0; i < nP; i++) {
+      var qx0 = px[i], qy0 = py[i];
+      var pxi = Math.floor(qx0 * pInvSpacing);
+      var pyi = Math.floor(qy0 * pInvSpacing);
+      var x0 = Math.max(pxi - 1, 0), y0 = Math.max(pyi - 1, 0);
+      var x1 = Math.min(pxi + 1, pNumX - 1), y1 = Math.min(pyi + 1, pNumY - 1);
+
+      for (xi = x0; xi <= x1; xi++) {
+        for (yi = y0; yi <= y1; yi++) {
+          cellNr = xi * pNumY + yi;
+          var f = firstCellParticle[cellNr], l = firstCellParticle[cellNr + 1];
+          for (var k = f; k < l; k++) {
+            var id = cellParticleIds[k];
+            if (id === i) continue;
+            var dx = px[id] - px[i], dy = py[id] - py[i];
+            var d2 = dx * dx + dy * dy;
+            if (d2 > minDist2 || d2 === 0.0) continue;
+            var d = Math.sqrt(d2);
+            var sc = 0.5 * (minDist - d) / d;
+            dx *= sc; dy *= sc;
+            px[i] -= dx; py[i] -= dy;
+            px[id] += dx; py[id] += dy;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ---- 3. wall collisions (now its own pass, run after pushApart) ----
+function handleParticleCollisions() {
+  var minX = h + pRadius, maxX = (simW - 1) * h - pRadius;
+  var minY = h + pRadius, maxY = (simH - 1) * h - pRadius;
+  for (var i = 0; i < nP; i++) {
+    if (px[i] < minX) { px[i] = minX; pvx[i] = 0; }
+    else if (px[i] > maxX) { px[i] = maxX; pvx[i] = 0; }
+    if (py[i] < minY) { py[i] = minY; pvy[i] = 0; }
+    else if (py[i] > maxY) { py[i] = maxY; pvy[i] = 0; }
+  }
+}
+
+// ---- 4. particles -> grid ----
+// u lives on the left face of a cell  -> sampled at (i,     j+0.5)
+// v lives on the bottom face of a cell -> sampled at (i+0.5, j)
+function transferToGrid() {
+  u.fill(0); v.fill(0); wU.fill(0); wV.fill(0);
+
+  var i;
+  for (i = 0; i < numCells; i++)
+    cellType[i] = (s[i] === 0.0) ? SOLID : AIR;
+
+  for (i = 0; i < nP; i++) {
+    var ci = clamp(Math.floor(px[i]), 0, simW - 1);
+    var cj = clamp(Math.floor(py[i]), 0, simH - 1);
+    var idx = ci + cj * simW;
+    if (cellType[idx] === AIR) cellType[idx] = FLUID;
+  }
+
+  for (var p = 0; p < nP; p++) {
+    // u component
+    var x = px[p], y = py[p] - 0.5;
+    var i0 = clamp(Math.floor(x), 0, simW - 2), j0 = clamp(Math.floor(y), 0, simH - 2);
+    var fx = clamp(x - i0, 0, 1), fy = clamp(y - j0, 0, 1);
+    var w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+    var a = i0 + j0 * simW, b = a + 1, c = a + simW, d = c + 1;
+    u[a] += w00 * pvx[p]; wU[a] += w00;
+    u[b] += w10 * pvx[p]; wU[b] += w10;
+    u[c] += w01 * pvx[p]; wU[c] += w01;
+    u[d] += w11 * pvx[p]; wU[d] += w11;
+
+    // v component
+    x = px[p] - 0.5; y = py[p];
+    i0 = clamp(Math.floor(x), 0, simW - 2); j0 = clamp(Math.floor(y), 0, simH - 2);
+    fx = clamp(x - i0, 0, 1); fy = clamp(y - j0, 0, 1);
+    w00 = (1 - fx) * (1 - fy); w10 = fx * (1 - fy); w01 = (1 - fx) * fy; w11 = fx * fy;
+    a = i0 + j0 * simW; b = a + 1; c = a + simW; d = c + 1;
+    v[a] += w00 * pvy[p]; wV[a] += w00;
+    v[b] += w10 * pvy[p]; wV[b] += w10;
+    v[c] += w01 * pvy[p]; wV[c] += w01;
+    v[d] += w11 * pvy[p]; wV[d] += w11;
+  }
+
+  for (i = 0; i < numCells; i++) {
+    if (wU[i] > 0) u[i] /= wU[i];
+    if (wV[i] > 0) v[i] /= wV[i];
+  }
+
+  // enforce solid boundary velocities
+  for (var ii = 0; ii < simW; ii++) {
+    for (var jj = 0; jj < simH; jj++) {
+      var k = ii + jj * simW;
+      var isSolid = cellType[k] === SOLID;
+      if (isSolid || (ii > 0 && cellType[k - 1] === SOLID)) u[k] = 0;
+      if (isSolid || (jj > 0 && cellType[k - simW] === SOLID)) v[k] = 0;
+    }
+  }
+}
+
+// ---- 5. particle density (this is what was missing) ----
+function updateParticleDensity() {
+  particleDensity.fill(0);
+  var h2 = 0.5 * h;
+
+  for (var p = 0; p < nP; p++) {
+    var x = clamp(px[p], h, (simW - 1) * h);
+    var y = clamp(py[p], h, (simH - 1) * h);
+
+    var x0 = Math.floor((x - h2) / h);
+    var tx = ((x - h2) - x0 * h) / h;
+    var x1 = Math.min(x0 + 1, simW - 2);
+    var y0 = Math.floor((y - h2) / h);
+    var ty = ((y - h2) - y0 * h) / h;
+    var y1 = Math.min(y0 + 1, simH - 2);
+
+    var sx = 1.0 - tx, sy = 1.0 - ty;
+    if (x0 < simW && y0 < simH) particleDensity[x0 + y0 * simW] += sx * sy;
+    if (x1 < simW && y0 < simH) particleDensity[x1 + y0 * simW] += tx * sy;
+    if (x1 < simW && y1 < simH) particleDensity[x1 + y1 * simW] += tx * ty;
+    if (x0 < simW && y1 < simH) particleDensity[x0 + y1 * simW] += sx * ty;
+  }
+
+  // measure the rest density once, from the initial (well-packed) state
+  if (particleRestDensity === 0.0) {
+    var sum = 0, n = 0;
+    for (var i = 0; i < numCells; i++) {
+      if (cellType[i] === FLUID) { sum += particleDensity[i]; n++; }
+    }
+    if (n > 0) particleRestDensity = sum / n;
+  }
+}
+
+// ---- 6. pressure solve ----
+// prevU/prevV are snapshotted HERE — the FLIP delta must be
+// (after pressure) - (after transfer), within the same frame.
+function solveIncompressibility() {
+  prevU.set(u); prevV.set(v);
+
+  for (var iter = 0; iter < numPressureIters; iter++) {
+    for (var i = 1; i < simW - 1; i++) {
+      for (var j = 1; j < simH - 1; j++) {
+        var center = i + j * simW;
+        if (cellType[center] !== FLUID) continue;
+
+        var left = center - 1, right = center + 1;
+        var bottom = center - simW, top = center + simW;
+
+        var sx0 = s[left], sx1 = s[right], sy0 = s[bottom], sy1 = s[top];
+        var sSum = sx0 + sx1 + sy0 + sy1;
+        if (sSum === 0.0) continue;
+
+        var div = u[right] - u[center] + v[top] - v[center];
+
+        if (particleRestDensity > 0.0 && compensateDrift) {
+          var compression = particleDensity[center] - particleRestDensity;
+          if (compression > 0.0) div -= driftK * compression;
+        }
+
+        var p = -div / sSum * overRelax;
+
+        u[center] -= sx0 * p;
+        u[right]  += sx1 * p;
+        v[center] -= sy0 * p;
+        v[top]    += sy1 * p;
+      }
+    }
+  }
+}
+
+// ---- 7. extrapolate into air, AFTER the solve ----
+// u and prevU are filled from the SAME neighbour set so the FLIP delta
+// stays meaningful at the free surface.
+function extrapolateVelocities() {
+  for (var pass = 0; pass < 2; pass++) {
+    for (var i = 1; i < simW - 1; i++) {
+      for (var j = 1; j < simH - 1; j++) {
+        var idx = i + j * simW;
+        if (cellType[idx] === SOLID) continue;
+
+        if (wU[idx] === 0) {
+          var su = 0, sp = 0, cnt = 0;
+          if (wU[idx - 1] > 0)    { su += u[idx - 1];    sp += prevU[idx - 1];    cnt++; }
+          if (wU[idx + 1] > 0)    { su += u[idx + 1];    sp += prevU[idx + 1];    cnt++; }
+          if (wU[idx - simW] > 0) { su += u[idx - simW]; sp += prevU[idx - simW]; cnt++; }
+          if (wU[idx + simW] > 0) { su += u[idx + simW]; sp += prevU[idx + simW]; cnt++; }
+          if (cnt > 0) { u[idx] = su / cnt; prevU[idx] = sp / cnt; wU[idx] = 1; }
+        }
+        if (wV[idx] === 0) {
+          var sv = 0, sq = 0, cnt2 = 0;
+          if (wV[idx - 1] > 0)    { sv += v[idx - 1];    sq += prevV[idx - 1];    cnt2++; }
+          if (wV[idx + 1] > 0)    { sv += v[idx + 1];    sq += prevV[idx + 1];    cnt2++; }
+          if (wV[idx - simW] > 0) { sv += v[idx - simW]; sq += prevV[idx - simW]; cnt2++; }
+          if (wV[idx + simW] > 0) { sv += v[idx + simW]; sq += prevV[idx + simW]; cnt2++; }
+          if (cnt2 > 0) { v[idx] = sv / cnt2; prevV[idx] = sq / cnt2; wV[idx] = 1; }
+        }
+      }
+    }
+  }
+}
+
+// ---- 8. grid -> particles ----
+function transferToParticles() {
+  var maxSp2 = MAX_SPEED * MAX_SPEED;
+
+  for (var p = 0; p < nP; p++) {
+    var x = px[p], y = py[p] - 0.5;
+    var i0 = clamp(Math.floor(x), 0, simW - 2), j0 = clamp(Math.floor(y), 0, simH - 2);
+    var fx = clamp(x - i0, 0, 1), fy = clamp(y - j0, 0, 1);
+    var w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+    var a = i0 + j0 * simW, b = a + 1, c = a + simW, d = c + 1;
+
+    var picU  = w00 * u[a]     + w10 * u[b]     + w01 * u[c]     + w11 * u[d];
+    var oldU  = w00 * prevU[a] + w10 * prevU[b] + w01 * prevU[c] + w11 * prevU[d];
+    pvx[p] = flipRatio * (pvx[p] + (picU - oldU)) + (1 - flipRatio) * picU;
+
+    x = px[p] - 0.5; y = py[p];
+    i0 = clamp(Math.floor(x), 0, simW - 2); j0 = clamp(Math.floor(y), 0, simH - 2);
+    fx = clamp(x - i0, 0, 1); fy = clamp(y - j0, 0, 1);
+    w00 = (1 - fx) * (1 - fy); w10 = fx * (1 - fy); w01 = (1 - fx) * fy; w11 = fx * fy;
+    a = i0 + j0 * simW; b = a + 1; c = a + simW; d = c + 1;
+
+    var picV  = w00 * v[a]     + w10 * v[b]     + w01 * v[c]     + w11 * v[d];
+    var oldV  = w00 * prevV[a] + w10 * prevV[b] + w01 * prevV[c] + w11 * prevV[d];
+    pvy[p] = flipRatio * (pvy[p] + (picV - oldV)) + (1 - flipRatio) * picV;
+
+    var sp2 = pvx[p] * pvx[p] + pvy[p] * pvy[p];
+    if (sp2 > maxSp2) {
+      var sc = MAX_SPEED / Math.sqrt(sp2);
+      pvx[p] *= sc; pvy[p] *= sc;
+    }
+  }
+}
+
+function simulate() {
+  integrateParticles(dt);
+  pushParticlesApart(numParticleIters);
+  handleParticleCollisions();
+  pushParticlesApart(numParticleIters);
+  handleParticleCollisions();
+  transferToGrid();
+  updateParticleDensity();
+  solveIncompressibility();
+  extrapolateVelocities();
+  transferToParticles();
+}
+
+// ---- Gyroscope ----
+var gyroBtn = document.getElementById('gyro-btn');
+var gyroActive = false;
+function handleOri(e) {
+  var beta = clamp(e.beta || 0, -90, 90);
+  var gamma = clamp(e.gamma || 0, -90, 90);
+  gx = gamma / 90 * 18;
+  gy = clamp(beta / 90 * 18 + 6, 1, 26);
+}
+function hideBtn() {
+  gyroActive = true;
+  gyroBtn.style.opacity = '0';
+  setTimeout(function () { gyroBtn.style.display = 'none'; }, 600);
+}
+function activateGyro() {
+  if (gyroActive) return;
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().then(function (st) {
+      if (st === 'granted') { window.addEventListener('deviceorientation', handleOri); hideBtn(); }
+    }).catch(function () {});
+  } else {
+    window.addEventListener('deviceorientation', handleOri);
+    hideBtn();
+  }
+}
+gyroBtn.addEventListener('click', function (e) { e.stopPropagation(); activateGyro(); });
+gyroBtn.addEventListener('touchend', function (e) { e.preventDefault(); e.stopPropagation(); activateGyro(); });
+
+// ---- Touch ----
+function addAt(sx, sy) {
+  var x = sx / W * simW, y = sy / H * simH;
+  var gLen = Math.sqrt(gx * gx + gy * gy) || 1;
+  var dirX = gx / gLen, dirY = (gy || 5) / gLen;
+  for (var i = 0; i < 4; i++) {
+    var speed = 2 + Math.random() * 4;
+    var vx = dirX * speed + (Math.random() - 0.5) * 3;
+    var vy = dirY * speed + (Math.random() - 0.5) * 3;
+    var nx = x + (Math.random() - 0.5) * 1.2;
+    var ny = y + (Math.random() - 0.5) * 1.2;
+    var slot;
+    if (nP >= maxP) {
+      slot = Math.floor(Math.random() * nP * 0.2);
+    } else {
+      slot = nP; nP++;
+    }
+    px[slot] = clamp(nx, 1 + pRadius, simW - 1 - pRadius);
+    py[slot] = clamp(ny, 1 + pRadius, simH - 1 - pRadius);
+    pvx[slot] = vx; pvy[slot] = vy;
+  }
+}
+canvas.addEventListener('touchstart', function (e) { e.preventDefault(); for (var i = 0; i < e.touches.length; i++) addAt(e.touches[i].clientX, e.touches[i].clientY); });
+canvas.addEventListener('touchmove',  function (e) { e.preventDefault(); for (var i = 0; i < e.touches.length; i++) addAt(e.touches[i].clientX, e.touches[i].clientY); });
+canvas.addEventListener('mousedown',  function (e) { addAt(e.clientX, e.clientY); });
+canvas.addEventListener('mousemove',  function (e) { if (e.buttons === 1) addAt(e.clientX, e.clientY); });
+
+// ---- Render ----
+var waterColors = ['#4a7c8f', '#5194a8', '#5ba3b5', '#68b0c0', '#7cc4d4'];
+var occ = null;
+
+function render() {
+  ctx.fillStyle = '#0a0e17';
+  ctx.fillRect(0, 0, W, H);
+
+  var n = displayCols * displayRows;
+  if (!occ || occ.length !== n) occ = new Uint16Array(n);
+  else occ.fill(0);
+
+  var scX = displayCols / simW, scY = displayRows / simH;
+  for (var p = 0; p < nP; p++) {
+    var dc = Math.floor(px[p] * scX);
+    var dr = Math.floor(py[p] * scY);
+    if (dc >= 0 && dc < displayCols && dr >= 0 && dr < displayRows)
+      occ[dr * displayCols + dc]++;
+  }
+
+  for (var r = 0; r < displayRows; r++) {
+    for (var c = 0; c < displayCols; c++) {
+      var k = occ[r * displayCols + c];
+      if (k > 0) {
+        var ci = (r * 7 + c * 13) % waterColors.length;
+        ctx.globalAlpha = Math.min(1, k * 0.35 + 0.35);
+        ctx.fillStyle = waterColors[ci];
+        ctx.fillRect(c * STEP, r * STEP, CELL, CELL);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function loop() {
+  simulate();
+  render();
+  requestAnimationFrame(loop);
+}
+
+resize();
+var rt;
+window.addEventListener('resize', function () {
+  clearTimeout(rt);
+  rt = setTimeout(resize, 150);
+});
+loop();
+</script>
