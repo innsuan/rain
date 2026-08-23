@@ -27,7 +27,7 @@ var CONFIG = {
   // ---- 像素格 · grid ----
   block: 4,          // 方块边长（CSS 像素）  block size in px
   gap: 8,            // 方块之间的缝隙        gap between blocks in px
-  maxCells: 3400,    // 格子数上限，卡顿就调小 lower this if the phone stutters
+  maxCells: 1410,    // 格子数上限，卡顿就调小 lower this if the phone stutters
 
   // ---- 颜色 · colour ----
   r: 91, g: 163, b: 181,   // 水色，默认 #5ba3b5
@@ -35,8 +35,8 @@ var CONFIG = {
   surfaceFade: 0,          // 0 = 颜色完全均匀；0.3-0.5 = 水面边缘柔化
 
   // ---- 光晕 · glow ----
-  // 两层分别渲染、模糊，再按权重合成为一张（权重和恒为 1，不会截断、不偏色），
-  // 最后以 glow 的强度叠加。glow < 1 保证光晕永远比方块暗。
+  // 方块和它的光晕一起烘焙进一张精灵，每格盖一次。贴身层和弥散层的衰减曲线
+  // 按 haloMix 合成为同一条，所以两者共用一张图，不需要离屏合成。
   glow: 0.99,        // 光晕峰值亮度，占方块颜色的比例。必须 <= 1
                      //   0.9 以上时紧贴方块的一圈几乎与方块等亮
   glowBoost: 1.0,    // 整体提亮系数。相邻光晕用覆盖而非加法叠加，重叠处偏暗，
@@ -53,15 +53,23 @@ var CONFIG = {
   // ---- 水量 · water ----
   // 雨量和水位是分开的：雨永远按 rainRate 下，水位靠排水自动调节，
   // 多了就多排、少了就少排，所以调 rainRate 只改雨的密度，不改水面高度。
-  rainRate: 1,       // 每帧从顶部落下的雨滴数，可以是小数。
+  rainRate: 0.2,     // 每帧从顶部落下的雨滴数，可以是小数。
                      //   0.2 = 每 5 帧一颗（约每秒 12 颗），1 稀疏，4 中等，8 密集
-  rainRateMax: 8,    // rainRate 的硬上限，写再大也不会超过
+  rainRateMax: 2,    // rainRate 的硬上限，写再大也不会超过
   rainMaxDrops: 700, // 空中同时存在的雨滴上限。满了就暂停生成，
                      //   这是防止「雨落得比排水快、水位涨到屏顶」的主要闸门
-  waterLevel: 0.55,  // 水面高度，0 = 顶部，1 = 底部。初始水量和目标水量都由它决定
-  drainSpeed: 0.12,  // 水位回到目标值的快慢。太大水面会一跳一跳
+  waterLevel: 0.75,  // 水面高度，0 = 顶部，1 = 底部。初始水量和目标水量都由它决定
+  drainSpeed: 0.05,  // 水位回到目标值的快慢。太大水面会一跳一跳
   drainBand: 3,      // 底部多少格内的水可以被排走。太窄会限制最大排水量
-  maxParticles: 6000,
+  maxParticles: 12000,
+                     // 粒子总数上限。particlesPerCell 调大时要一起提，否则
+                     //   播种会提前截断，静止密度达不到设定值
+  particlesPerCell: 9,
+                     // 一格水体由多少颗粒子构成。这决定了「一滴雨相对于水体
+                     //   有多大」：一滴雨永远是 1 颗，所以它落进一格造成的
+                     //   密度超压是 1/N —— N=3 时超压 33%，密度补偿会把周围
+                     //   的水狠狠顶开；N=8 时只有 12.5%，涟漪就小得多。
+                     //   代价是粒子总数按 N 线性增长（约 1.1ms / 千颗）。
 
   // ---- 潮汐 · tide ----
   // 垂直于重力方向的正弦加速度。重力朝下时是左右摇，手机侧过来时会自动
@@ -69,63 +77,44 @@ var CONFIG = {
   // 回落、拍打边缘，而不是整块平移。
   tideAmplitude: 2,  // 摇晃力度，和 gravity 同单位。0 = 关闭。
                      //   gravity 的 20% 左右是很明显的晃动
-  tidePeriod: 6.0,   // 一个完整来回的秒数。越小越急促。
-                     //   注意水池本身有固有周期（当前设置下约 5 秒），设在附近
+  tidePeriod: 12.0,  // 一个完整来回的秒数。越小越急促。
+                     //   注意水池本身有固有周期（当前设置下约 4-5 秒），设在附近
                      //   会共振、摆幅放大数倍；想要克制的晃动就避开它
   tideRainImmune: true,  // true = 下落中的雨滴不受潮汐影响
 
   // ---- 交互 · interaction ----
   // 重力只由陀螺仪决定。拖拽不改变重力，只在手指划过的瞬间推动水体。
-  dragStrength: 26,  // 拖拽推水的力度
-  dragRadius: 3.2,   // 拖拽影响的半径，单位是「格」
+  dragStrength: 50,  // 拖拽推水的力度
+  dragRadius: 50,    // 拖拽影响的半径，单位是「格」。比屏幕还大就是整片水一起推
   dragMaxSpeed: 40,  // 单次拖拽能给出的最大速度，防止甩太狠
   rainImmune: true,  // true = 正在下落的雨滴不受拖拽影响
   rainDiscrete: true,// true = 下落中的雨滴各自独立：不互推、不进网格、不参与压力，
                      //   所以是一颗一颗分开的方块，落进水体的瞬间才并入流体
-  rainSpread: 4,     // 生成时在上游方向铺开几格，避免一帧的雨排成一条线
+  rainSpread: 4,     // 生成时沿上游方向铺开几格，避免一帧的雨排成一条线
+  rainTerminal: 0,    // 雨滴的终端速度（格/秒）。自由落体会一路加速，落水时
+                     //   动量远大于水体本身，涟漪就会过大。这相当于空气阻力，
+                     //   同时也让雨的下落速度看起来一致。0 = 不限速
+  rainImpact: 0.25,   // 落水瞬间保留多少动量。1 = 全部注入（原来的行为），
+                     //   0.3-0.5 是明显但克制的涟漪，0.1 几乎无声
 
   // ---- 性能 · performance ----
   // 物理时间跟着真实时间走，所以帧率低时水不会变成慢动作。
-  // 帧率持续跟不上时自动降低求解精度和光晕层数，画质换流畅。
   showStats: false,  // true = 左上角显示帧率读数。也可以在网址后面加 ?fps=1 临时打开
-  autoQuality: true, // false = 永远用满配，慢机器上就慢着
-  targetFps: 30,     // 低于这个就开始降级，明显高于它才升回来
-  minQuality: 0.35,  // 最多降到多少（0.35 大约是一半的求解量 + 单层光晕）
+  autoQuality: false,// false = 永远用满配，慢机器上就慢着
+  targetFps: 52,     // 低于这个就开始降级，明显高于它才升回来
+  minQuality: 0.35,  // 最多降到多少
 
   // ---- 手感 · feel ----
   gravity: 25,       // 重力大小。手机竖直时的满值；越平躺越接近 0
   gravityFloor: 0.2, // 手机接近水平时保留的最小重力，占 gravity 的比例。
                      //   0 = 完全失重（水会飘着不动）
-  flipRatio: 0.95,   // 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
-  pressureIters: 25, // 越高水越不可压缩，越贵
-  particleIters: 3,  // 粒子互推的迭代次数
+  flipRatio: 0.925,  // 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
+  pressureIters: 20, // 越高水越不可压缩，越贵
+  particleIters: 2,  // 粒子互推的迭代次数
   driftK: 1.0,       // 密度补偿强度，防止结块和空洞
 };
 
-// ---- 兜底：补齐缺失的键 ----
-// 粘贴一份旧的 CONFIG 时，缺的键会是 undefined，一路算成 NaN 而且很难查。
-// 这里用一份完整的默认值补齐，并把不认识的键报到控制台。
-(function fillDefaults() {
-  var D = {
-    block: 4, gap: 8, maxCells: 3400,
-    r: 91, g: 163, b: 181, bg: '#0a0e17', surfaceFade: 0,
-    glow: 0.99, glowBoost: 1.0, haloMix: 0.8, haloSpread: 1.2, bloomSpread: 3.0,
-    core: 0.2, falloff: 2.75,
-    rainRate: 1, rainRateMax: 8, rainMaxDrops: 700,
-    waterLevel: 0.55, drainSpeed: 0.12, drainBand: 3, maxParticles: 6000,
-    tideAmplitude: 2, tidePeriod: 6.0, tideRainImmune: true,
-    showStats: false, autoQuality: true, targetFps: 52, minQuality: 0.35,
-    dragStrength: 26, dragRadius: 3.2, dragMaxSpeed: 40,
-    rainImmune: true, rainDiscrete: true, rainSpread: 4,
-    gravity: 20, gravityFloor: 0.2,
-    flipRatio: 0.95, pressureIters: 25, particleIters: 3, driftK: 1.0
-  };
-  var missing = [], unknown = [];
-  for (var k in D) if (CONFIG[k] === undefined) { CONFIG[k] = D[k]; missing.push(k); }
-  for (var j in CONFIG) if (D[j] === undefined) unknown.push(j);
-  if (missing.length) console.warn('CONFIG 缺少这些键，已用默认值补上:', missing.join(', '));
-  if (unknown.length) console.warn('CONFIG 里有不认识的键，已忽略:', unknown.join(', '));
-})();
+
 
 
 
@@ -174,7 +163,9 @@ var pvy = new Float32Array(maxP);
 var pTag = new Uint8Array(maxP);
 
 // particle radius is now tied to the seeding spacing (lib.rs: r = 0.3*h, dx = 2r)
-var pRadius = 0.3 * h;
+// Particle radius sets how many fit in a cell: packing density goes as 1/r^2,
+// so r = 0.3h gives the reference 3 per cell and everything scales from there.
+var pRadius = 0.3 * h * Math.sqrt(3 / Math.max(1, CONFIG.particlesPerCell));
 var minDist = 2.0 * pRadius;
 var pInvSpacing = 1.0 / (2.2 * pRadius);
 var pNumX, pNumY, pNumCells;
@@ -302,11 +293,26 @@ function updateTide(sdt) {
 
 function integrateParticles(sdt) {
   var rainSkipsTide = CONFIG.tideRainImmune;
+  var term = CONFIG.rainTerminal, term2 = term * term;
+
   for (var i = 0; i < nP; i++) {
+    var isRain = pTag[i] === 1;
     var ax = gx, ay = gy;
-    if (!(rainSkipsTide && pTag[i] === 1)) { ax += tideX; ay += tideY; }
+    if (!(rainSkipsTide && isRain)) { ax += tideX; ay += tideY; }
     pvx[i] += sdt * ax;
     pvy[i] += sdt * ay;
+
+    // Drops are ballistic, so nothing else limits how fast they arrive. Left
+    // unchecked they hit the surface carrying far more momentum than the body
+    // has, which is what makes the splash look oversized.
+    if (isRain && term > 0) {
+      var sp2 = pvx[i] * pvx[i] + pvy[i] * pvy[i];
+      if (sp2 > term2) {
+        var sc = term / Math.sqrt(sp2);
+        pvx[i] *= sc; pvy[i] *= sc;
+      }
+    }
+
     px[i] += pvx[i] * sdt;
     py[i] += pvy[i] * sdt;
   }
@@ -503,7 +509,12 @@ function retireLandedRain() {
       (cj + 1 < simH && cellType[idx + simW] === FLUID) ||
       py[i] > simH - 2.2;
 
-    if (landed) pTag[i] = 0;
+    if (landed) {
+      pTag[i] = 0;
+      // shed most of the impact momentum as it joins the body
+      var d = CONFIG.rainImpact;
+      pvx[i] *= d; pvy[i] *= d;
+    }
   }
 }
 
@@ -790,40 +801,49 @@ function spawnRainDrop(slot) {
 
   var cx = (lo + hiX) * 0.5, cy = (lo + hiY) * 0.5;
 
-  // how far upwind the box reaches, measured along gravity from the centre
-  var sMin = Infinity;
+  // Full span of the box along the surface direction. Picking a point here
+  // first is the whole trick: the spawn band then hugs both upwind edges at
+  // full width. Anchoring on the single most-upwind corner instead produces a
+  // short diagonal sliver, which is what rain used to fall from.
+  var tMin = Infinity, tMax = -Infinity;
   var xs = [lo, hiX], ys = [lo, hiY];
   for (var a = 0; a < 2; a++) {
     for (var b = 0; b < 2; b++) {
-      var d = (xs[a] - cx) * ux + (ys[b] - cy) * uy;
-      if (d < sMin) sMin = d;
+      var t = (xs[a] - cx) * qx + (ys[b] - cy) * qy;
+      if (t < tMin) tMin = t;
+      if (t > tMax) tMax = t;
     }
   }
 
-  var sp = sMin + 0.6 + Math.random() * CONFIG.rainSpread;
-  var bx = cx + ux * sp, by = cy + uy * sp;
+  var tt = tMin + Math.random() * (tMax - tMin);
+  var ax = cx + qx * tt, ay = cy + qy * tt;
 
-  // clip the spawn line to the box to find the valid span along q
-  var t0 = -1e9, t1 = 1e9;
-  if (Math.abs(qx) < 1e-6) { if (bx < lo || bx > hiX) return false; }
+  // walk back up the gravity ray from that point to where it enters the box
+  var s0 = -1e9, s1 = 1e9;
+  if (Math.abs(ux) < 1e-6) { if (ax < lo || ax > hiX) return false; }
   else {
-    var a0 = (lo - bx) / qx, a1 = (hiX - bx) / qx;
-    if (a0 > a1) { var tmp = a0; a0 = a1; a1 = tmp; }
-    if (a0 > t0) t0 = a0;
-    if (a1 < t1) t1 = a1;
+    var e0 = (lo - ax) / ux, e1 = (hiX - ax) / ux;
+    if (e0 > e1) { var sw = e0; e0 = e1; e1 = sw; }
+    if (e0 > s0) s0 = e0;
+    if (e1 < s1) s1 = e1;
   }
-  if (Math.abs(qy) < 1e-6) { if (by < lo || by > hiY) return false; }
+  if (Math.abs(uy) < 1e-6) { if (ay < lo || ay > hiY) return false; }
   else {
-    var b0 = (lo - by) / qy, b1 = (hiY - by) / qy;
-    if (b0 > b1) { var tmp2 = b0; b0 = b1; b1 = tmp2; }
-    if (b0 > t0) t0 = b0;
-    if (b1 < t1) t1 = b1;
+    var f0 = (lo - ay) / uy, f1 = (hiY - ay) / uy;
+    if (f0 > f1) { var sw2 = f0; f0 = f1; f1 = sw2; }
+    if (f0 > s0) s0 = f0;
+    if (f1 < s1) s1 = f1;
   }
-  if (t1 <= t0) return false;
+  if (s1 <= s0) return false;
 
-  var t = t0 + Math.random() * (t1 - t0);
-  px[slot] = clamp(bx + qx * t, lo, hiX);
-  py[slot] = clamp(by + qy * t, lo, hiY);
+  // just inside the entry point, spread a few cells deep so a frame's worth of
+  // rain isn't a straight line
+  var depth = Math.min(CONFIG.rainSpread, (s1 - s0) * 0.9);
+  var sp = s0 + 0.4 + Math.random() * depth;
+  if (sp > s1) sp = s1;
+
+  px[slot] = clamp(ax + ux * sp, lo, hiX);
+  py[slot] = clamp(ay + uy * sp, lo, hiY);
 
   var speed = 2 + Math.random() * 3;
   var drift = (Math.random() - 0.5) * 0.5;
