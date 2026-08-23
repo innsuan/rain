@@ -1000,6 +1000,23 @@ function drawGlow() {
   var wBloom = 1 - wHalo;   // the two weights sum to 1 — no clipping, no hue shift
 
   paintCells(haloCv, haloCtx, sub, appearance.haloBlur, appearance.haloSpread);
+
+  // When the wide layer carries no weight there is nothing to merge, so skip
+  // both its sprite pass and the compose canvas and blit the halo straight to
+  // the screen. Painting it anyway and then multiplying by zero was costing a
+  // full extra pass per frame — the single biggest thing the quality governor
+  // was failing to actually switch off.
+  if (wBloom < 0.002) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = strength;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(haloCv, 0, 0, W, H);
+    ctx.restore();
+    return;
+  }
+
   paintCells(bloomCv, bloomCtx, 2, appearance.bloomBlur, appearance.bloomSpread);
 
   composeCtx.setTransform(1, 0, 0, 1, 0, 0);
