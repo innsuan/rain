@@ -51,7 +51,9 @@ var CONFIG = {
   falloff: 2.75,     // 平台之外的衰减曲线。1 = 线性偏亮，3 = 尾巴长而淡
   haloRadius: 4,     // 贴身层每格的子像素数 2-4，越大圆越平滑
   haloBlur: 0.4,     // 贴身层额外模糊，0 也可以（精灵本身已经是软的）
-  bloomBlur: 0.6,    // 弥散层额外模糊
+  bloomBlur: 0.6,    // 弥散层额外模糊（只影响 'rich'）
+  glowBoost: 1.0,    // 只影响 'fast'：整体提亮系数。'fast' 用覆盖而非加法叠加，
+                     //   重叠处比 'rich' 略暗，1.15-1.3 可以补回来
 
   // ---- 水量 · water ----
   // 雨量和水位是分开的：雨永远按 rainRate 下，水位靠排水自动调节，
@@ -113,7 +115,7 @@ var CONFIG = {
     block: 4, gap: 8, maxCells: 3400,
     r: 91, g: 163, b: 181, bg: '#0a0e17', surfaceFade: 0,
     glowMode: 'fast', glow: 0.99, haloMix: 0.8, haloSpread: 1.2, bloomSpread: 3.0,
-    core: 0.2, falloff: 2.75, haloRadius: 4, haloBlur: 0.4, bloomBlur: 0.6,
+    core: 0.2, falloff: 2.75, haloRadius: 4, haloBlur: 0.4, bloomBlur: 0.6, glowBoost: 1.0,
     rainRate: 1, rainRateMax: 8, rainMaxDrops: 700,
     waterLevel: 0.55, drainSpeed: 0.12, drainBand: 3, maxParticles: 6000,
     tideAmplitude: 2, tidePeriod: 6.0, tideRainImmune: true,
@@ -774,6 +776,7 @@ var appearance = {
   haloRadius: CONFIG.haloRadius,
   haloBlur: CONFIG.haloBlur,
   bloomBlur: CONFIG.bloomBlur,
+  glowBoost: CONFIG.glowBoost,
 };
 
 var maxWater = maxP - 200;  // leave headroom
@@ -1000,8 +1003,10 @@ function paintCells(cv, c, sub, blurPx, spreadCells) {
 var combo = null, comboSpan = 0, comboScale = 1;
 
 function buildComboSprite() {
-  // span covers the halo; the block sits in the middle at its real proportion
-  comboSpan = Math.max(appearance.haloSpread, 1.05);
+  // The sprite has to reach as far as the widest layer, otherwise the ambient
+  // wash from `bloomSpread` is simply missing — that was the whole difference
+  // people notice when switching off the 'rich' path.
+  comboSpan = Math.max(appearance.haloSpread, appearance.bloomSpread, 1.05);
   comboScale = dpr;
 
   var sizePx = Math.max(8, Math.round(cellW * comboSpan * comboScale));
@@ -1014,13 +1019,28 @@ function buildComboSprite() {
   var k = Math.max(0.2, appearance.falloff);
   var core = clamp(appearance.core, 0, 0.95);
 
-  // halo first, capped at `glow` so it can never out-shine the block
+  var wHalo = clamp(appearance.haloMix, 0, 1);
+  var wBloom = 1 - wHalo;
+
+  // both layers are concentric falloffs from the same centre, so their
+  // weighted sum is just another radial profile — one gradient carries both
+  var rHalo = appearance.haloSpread / comboSpan;    // as a fraction of the sprite radius
+  var rBloom = appearance.bloomSpread / comboSpan;
+
+  function profile(t, reach) {
+    if (reach <= 0) return 0;
+    var u = t / reach;
+    if (u >= 1) return 0;
+    return u <= core ? 1 : Math.pow((1 - u) / (1 - core), k);
+  }
+
   var g = c.createRadialGradient(mid, mid, 0, mid, mid, mid);
-  var N = 24;
+  var N = 32;
+  var peak = appearance.glow * (appearance.glowBoost || 1);
   for (var i = 0; i <= N; i++) {
     var t = i / N;
-    var a = (t <= core ? 1 : Math.pow((1 - t) / (1 - core), k)) * appearance.glow;
-    g.addColorStop(t, 'rgba(' + rgb + ',' + a.toFixed(4) + ')');
+    var a = (wHalo * profile(t, rHalo) + wBloom * profile(t, rBloom)) * peak;
+    g.addColorStop(t, 'rgba(' + rgb + ',' + Math.min(1, a).toFixed(4) + ')');
   }
   c.fillStyle = g;
   c.fillRect(0, 0, sizePx, sizePx);
