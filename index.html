@@ -12,16 +12,8 @@
     user-select: none;
   }
   canvas { display: block; position: fixed; top: 0; left: 0; }
-  #gyro-btn {
-    position: fixed; bottom: 15%; left: 50%; transform: translateX(-50%);
-    background: rgba(91,163,181,0.15); border: 1px solid rgba(91,163,181,0.4);
-    color: rgba(138,208,223,0.8); font-size: 14px; padding: 10px 24px;
-    border-radius: 4px; cursor: pointer; z-index: 10; transition: opacity 0.6s;
-    font-family: -apple-system, sans-serif;
-  }
 </style>
 <canvas id="c"></canvas>
-<div id="gyro-btn">启用陀螺仪</div>
 <script>
 'use strict';
 
@@ -77,28 +69,54 @@ var CONFIG = {
   tideAmplitude: 2,  // 摇晃力度，和 gravity 同单位。0 = 关闭。
                      //   gravity 的 20% 左右是很明显的晃动
   tidePeriod: 6.0,   // 一个完整来回的秒数。越小越急促。
-                     //   注意水池本身有固有周期（当前网格约 6 秒），设在附近
+                     //   注意水池本身有固有周期（当前设置下约 5 秒），设在附近
                      //   会共振、摆幅放大数倍；想要克制的晃动就避开它
   tideRainImmune: true,  // true = 下落中的雨滴不受潮汐影响
 
   // ---- 交互 · interaction ----
-  // 重力只由陀螺仪决定。拖拽不再改变重力，只在手指划过的瞬间推动水体。
+  // 重力只由陀螺仪决定。拖拽不改变重力，只在手指划过的瞬间推动水体。
   dragStrength: 26,  // 拖拽推水的力度
   dragRadius: 3.2,   // 拖拽影响的半径，单位是「格」
   dragMaxSpeed: 40,  // 单次拖拽能给出的最大速度，防止甩太狠
   rainImmune: true,  // true = 正在下落的雨滴不受拖拽影响
   rainDiscrete: true,// true = 下落中的雨滴各自独立：不互推、不进网格、不参与压力，
                      //   所以是一颗一颗分开的方块，落进水体的瞬间才并入流体
-  rainSpread: 4,     // 生成时在纵向铺开几格，避免一帧的雨排成一条横线
+  rainSpread: 4,     // 生成时在上游方向铺开几格，避免一帧的雨排成一条线
 
- // ---- 手感 · feel ----
-  gravity: 20,       // 重力大小（陀螺仪未启用时的默认向下重力）
-  tiltRange: 18,     // 陀螺仪能产生的最大横向重力
-  flipRatio: 0.95,  // 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
+  // ---- 手感 · feel ----
+  gravity: 20,       // 重力大小。手机竖直时的满值；越平躺越接近 0
+  gravityFloor: 0.2, // 手机接近水平时保留的最小重力，占 gravity 的比例。
+                     //   0 = 完全失重（水会飘着不动）
+  flipRatio: 0.95,   // 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
   pressureIters: 25, // 越高水越不可压缩，越贵
   particleIters: 3,  // 粒子互推的迭代次数
-  driftK: 1.0,       // 密度补偿
+  driftK: 1.0,       // 密度补偿强度，防止结块和空洞
 };
+
+// ---- 兜底：补齐缺失的键 ----
+// 粘贴一份旧的 CONFIG 时，缺的键会是 undefined，一路算成 NaN 而且很难查。
+// 这里用一份完整的默认值补齐，并把不认识的键报到控制台。
+(function fillDefaults() {
+  var D = {
+    block: 4, gap: 8, maxCells: 3400,
+    r: 91, g: 163, b: 181, bg: '#0a0e17', surfaceFade: 0,
+    glow: 0.99, haloMix: 0.8, haloSpread: 1.2, bloomSpread: 3.0,
+    core: 0.2, falloff: 2.75, haloRadius: 4, haloBlur: 0.4, bloomBlur: 0.6,
+    rainRate: 1, rainRateMax: 8, rainMaxDrops: 700,
+    waterLevel: 0.55, drainSpeed: 0.12, drainBand: 3, maxParticles: 6000,
+    tideAmplitude: 2, tidePeriod: 6.0, tideRainImmune: true,
+    dragStrength: 26, dragRadius: 3.2, dragMaxSpeed: 40,
+    rainImmune: true, rainDiscrete: true, rainSpread: 4,
+    gravity: 20, gravityFloor: 0.2,
+    flipRatio: 0.95, pressureIters: 25, particleIters: 3, driftK: 1.0
+  };
+  var missing = [], unknown = [];
+  for (var k in D) if (CONFIG[k] === undefined) { CONFIG[k] = D[k]; missing.push(k); }
+  for (var j in CONFIG) if (D[j] === undefined) unknown.push(j);
+  if (missing.length) console.warn('CONFIG 缺少这些键，已用默认值补上:', missing.join(', '));
+  if (unknown.length) console.warn('CONFIG 里有不认识的键，已忽略:', unknown.join(', '));
+})();
+
 
 
 // ============================================================
@@ -594,33 +612,74 @@ function simulate() {
 }
 
 // ---- Gyroscope ----
-var gyroBtn = document.getElementById('gyro-btn');
-var gyroActive = false;
+// beta/gamma are Euler angles, not screen-space components. Rebuild the actual
+// gravity vector from the rotation matrix, then rotate it by the screen's own
+// orientation angle — skipping that second step is what made gravity point
+// along a diagonal once the phone was turned sideways.
+
+var gyroActive = false, gyroLive = false;
+
+function screenAngle() {
+  if (screen && screen.orientation && typeof screen.orientation.angle === 'number')
+    return screen.orientation.angle;
+  return window.orientation || 0;   // older iOS
+}
+
 function handleOri(e) {
-  var beta = clamp(e.beta || 0, -90, 90);
-  var gamma = clamp(e.gamma || 0, -90, 90);
-  gx = gamma / 90 * CONFIG.tiltRange;
-  gy = clamp(beta / 90 * CONFIG.tiltRange + CONFIG.gravity * 0.5, 1, CONFIG.gravity * 2.2);
+  if (e.beta === null && e.gamma === null) return;
+  gyroLive = true;
+
+  var beta = (e.beta || 0) * Math.PI / 180;    // front-back tilt
+  var gamma = (e.gamma || 0) * Math.PI / 180;  // left-right tilt
+
+  // Gravity in the device's own frame, from the ZXY rotation matrix.
+  // Third row of R gives the vertical axis; the in-plane part is what we need.
+  var dx = Math.cos(beta) * Math.sin(gamma);   // device X (right)
+  var dy = Math.sin(beta);                     // device Y, already flipped to screen-down
+
+  // Now rotate into the *displayed* orientation.
+  var th = screenAngle() * Math.PI / 180;
+  var ct = Math.cos(th), st = Math.sin(th);
+  var sx = dx * ct + dy * st;
+  var sy = -dx * st + dy * ct;
+
+  // dx,dy are direction cosines, so their length is the sine of the tilt away
+  // from flat: standing upright gives 1, lying on a table gives 0.
+  var len = Math.sqrt(sx * sx + sy * sy);
+  var floor = CONFIG.gravityFloor;
+
+  if (len < 1e-3) {
+    // dead flat and no meaningful direction — keep whatever we had, just weak
+    var pl = Math.sqrt(gx * gx + gy * gy) || 1;
+    gx = gx / pl * CONFIG.gravity * floor;
+    gy = gy / pl * CONFIG.gravity * floor;
+    return;
+  }
+
+  var mag = Math.max(len, floor) * CONFIG.gravity;
+  gx = sx / len * mag;
+  gy = sy / len * mag;
 }
-function hideBtn() {
-  gyroActive = true;
-  gyroBtn.style.opacity = '0';
-  setTimeout(function () { gyroBtn.style.display = 'none'; }, 600);
-}
+
+// No button: the first touch anywhere doubles as the permission gesture.
 function activateGyro() {
   if (gyroActive) return;
+  gyroActive = true;
+
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function') {
     DeviceOrientationEvent.requestPermission().then(function (st) {
-      if (st === 'granted') { window.addEventListener('deviceorientation', handleOri); hideBtn(); }
+      if (st === 'granted') window.addEventListener('deviceorientation', handleOri);
     }).catch(function () {});
   } else {
     window.addEventListener('deviceorientation', handleOri);
-    hideBtn();
   }
 }
-gyroBtn.addEventListener('click', function (e) { e.stopPropagation(); activateGyro(); });
-gyroBtn.addEventListener('touchend', function (e) { e.preventDefault(); e.stopPropagation(); activateGyro(); });
+
+// re-evaluate on rotation so the axis snaps immediately, not on the next tilt
+window.addEventListener('orientationchange', function () {
+  if (screen && screen.orientation) return;   // modern path updates on its own
+});
 
 // ---- Touch/mouse → momentary impulse on the water ----
 // Gravity belongs to the gyroscope alone. A drag no longer tilts the world; it
@@ -666,6 +725,7 @@ function pointerEnd() {
 
 canvas.addEventListener('touchstart', function (e) {
   e.preventDefault();
+  activateGyro();                       // first touch is the permission gesture
   pointerStart(e.touches[0].clientX, e.touches[0].clientY);
 });
 canvas.addEventListener('touchmove', function (e) {
@@ -679,7 +739,7 @@ canvas.addEventListener('touchmove', function (e) {
 canvas.addEventListener('touchend', function (e) { e.preventDefault(); pointerEnd(); });
 canvas.addEventListener('touchcancel', function () { pointerEnd(); });
 
-canvas.addEventListener('mousedown', function (e) { pointerStart(e.clientX, e.clientY); });
+canvas.addEventListener('mousedown', function (e) { activateGyro(); pointerStart(e.clientX, e.clientY); });
 canvas.addEventListener('mousemove', function (e) { pointerMove(e.clientX, e.clientY); });
 canvas.addEventListener('mouseup', pointerEnd);
 canvas.addEventListener('mouseleave', pointerEnd);
@@ -707,6 +767,62 @@ var maxWater = maxP - 200;  // leave headroom
 
 var nRain = 0;        // drops currently in flight
 var rainCarry = 0;    // fractional leftover, so rainRate can be 0.2
+
+// Rain enters from the upwind edge — the side gravity is pulling away from —
+// along the line perpendicular to gravity, so turning the phone moves where
+// the rain comes from instead of leaving it stuck to one edge of the screen.
+function spawnRainDrop(slot) {
+  var lo = 1.2, hiX = simW - 1.2, hiY = simH - 1.2;
+
+  var gLen = Math.sqrt(gx * gx + gy * gy);
+  var ux, uy;
+  if (gLen < 1e-4) { ux = 0; uy = 1; }
+  else { ux = gx / gLen; uy = gy / gLen; }     // unit "down"
+  var qx = -uy, qy = ux;                       // unit "along the surface"
+
+  var cx = (lo + hiX) * 0.5, cy = (lo + hiY) * 0.5;
+
+  // how far upwind the box reaches, measured along gravity from the centre
+  var sMin = Infinity;
+  var xs = [lo, hiX], ys = [lo, hiY];
+  for (var a = 0; a < 2; a++) {
+    for (var b = 0; b < 2; b++) {
+      var d = (xs[a] - cx) * ux + (ys[b] - cy) * uy;
+      if (d < sMin) sMin = d;
+    }
+  }
+
+  var sp = sMin + 0.6 + Math.random() * CONFIG.rainSpread;
+  var bx = cx + ux * sp, by = cy + uy * sp;
+
+  // clip the spawn line to the box to find the valid span along q
+  var t0 = -1e9, t1 = 1e9;
+  if (Math.abs(qx) < 1e-6) { if (bx < lo || bx > hiX) return false; }
+  else {
+    var a0 = (lo - bx) / qx, a1 = (hiX - bx) / qx;
+    if (a0 > a1) { var tmp = a0; a0 = a1; a1 = tmp; }
+    if (a0 > t0) t0 = a0;
+    if (a1 < t1) t1 = a1;
+  }
+  if (Math.abs(qy) < 1e-6) { if (by < lo || by > hiY) return false; }
+  else {
+    var b0 = (lo - by) / qy, b1 = (hiY - by) / qy;
+    if (b0 > b1) { var tmp2 = b0; b0 = b1; b1 = tmp2; }
+    if (b0 > t0) t0 = b0;
+    if (b1 < t1) t1 = b1;
+  }
+  if (t1 <= t0) return false;
+
+  var t = t0 + Math.random() * (t1 - t0);
+  px[slot] = clamp(bx + qx * t, lo, hiX);
+  py[slot] = clamp(by + qy * t, lo, hiY);
+
+  var speed = 2 + Math.random() * 3;
+  var drift = (Math.random() - 0.5) * 0.5;
+  pvx[slot] = ux * speed + qx * drift;
+  pvy[slot] = uy * speed + qy * drift;
+  return true;
+}
 var drainCarry = 0;   // same idea for the drain side
 var drainList = [];
 
@@ -730,10 +846,7 @@ function applyWeather() {
     var toAdd = Math.min(whole, headroom, maxWater - nP);
     for (var i = 0; i < toAdd; i++) {
       if (nP >= maxP) break;
-      px[nP] = 1.5 + Math.random() * (simW - 3);
-      py[nP] = 1.5 + Math.random() * CONFIG.rainSpread;
-      pvx[nP] = (Math.random() - 0.5) * 0.5;
-      pvy[nP] = 2 + Math.random() * 3;
+      if (!spawnRainDrop(nP)) break;
       pTag[nP] = 1;
       nP++;
     }
