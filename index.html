@@ -37,6 +37,10 @@ var CONFIG = {
   // ---- 光晕 · glow ----
   // 两层分别渲染、模糊，再按权重合成为一张（权重和恒为 1，不会截断、不偏色），
   // 最后以 glow 的强度叠加。glow < 1 保证光晕永远比方块暗。
+  glowMode: 'fast',  // 'fast' = 预烘焙「方块+光晕」的合成精灵，每格盖一次就完事。
+                     //   没有离屏画布、没有全屏合成，绘制调用少三分之二。
+                     // 'rich' = 旧的双层 bloom 路径，只有需要大范围弥散辉光
+                     //   （bloomSpread 很大）时才值得
   glow: 0.99,        // 光晕峰值亮度，占方块颜色的比例。必须 < 1
                      //   0.9 以上时紧贴方块的一圈几乎与方块等亮
   haloMix: 0.8,      // 贴身光晕 vs 大范围辉光的配比。1 = 只要贴身的
@@ -89,7 +93,7 @@ var CONFIG = {
   showStats: false,  // true = 左上角显示帧率读数。也可以在网址后面加 ?fps=1 临时打开
   autoQuality: true, // false = 永远用满配，慢机器上就慢着
   targetFps: 52,     // 低于这个就开始降级，明显高于它才升回来
-  minQuality: 0.1,  // 最多降到多少（0.35 大约是一半的求解量 + 单层光晕）
+  minQuality: 0.35,  // 最多降到多少（0.35 大约是一半的求解量 + 单层光晕）
 
   // ---- 手感 · feel ----
   gravity: 20,       // 重力大小。手机竖直时的满值；越平躺越接近 0
@@ -108,7 +112,7 @@ var CONFIG = {
   var D = {
     block: 4, gap: 8, maxCells: 3400,
     r: 91, g: 163, b: 181, bg: '#0a0e17', surfaceFade: 0,
-    glow: 0.99, haloMix: 0.8, haloSpread: 1.2, bloomSpread: 3.0,
+    glowMode: 'fast', glow: 0.99, haloMix: 0.8, haloSpread: 1.2, bloomSpread: 3.0,
     core: 0.2, falloff: 2.75, haloRadius: 4, haloBlur: 0.4, bloomBlur: 0.6,
     rainRate: 1, rainRateMax: 8, rainMaxDrops: 700,
     waterLevel: 0.55, drainSpeed: 0.12, drainBand: 3, maxParticles: 6000,
@@ -931,6 +935,7 @@ function initBloomBuffers() {
   composeCtx = composeCv.getContext('2d');
 
   buildSprite();
+  buildComboSprite();
 }
 
 // One radial-gradient disc, generated once. Stamping this per cell is what
@@ -989,6 +994,65 @@ function paintCells(cv, c, sub, blurPx, spreadCells) {
     c.drawImage(cv, 0, 0);
     c.filter = 'none';
   }
+}
+
+// ---- fast path: one baked "block + halo" sprite, stamped once per cell ----
+var combo = null, comboSpan = 0, comboScale = 1;
+
+function buildComboSprite() {
+  // span covers the halo; the block sits in the middle at its real proportion
+  comboSpan = Math.max(appearance.haloSpread, 1.05);
+  comboScale = dpr;
+
+  var sizePx = Math.max(8, Math.round(cellW * comboSpan * comboScale));
+  combo = document.createElement('canvas');
+  combo.width = sizePx; combo.height = sizePx;
+  var c = combo.getContext('2d');
+
+  var mid = sizePx * 0.5;
+  var rgb = appearance.r + ',' + appearance.g + ',' + appearance.b;
+  var k = Math.max(0.2, appearance.falloff);
+  var core = clamp(appearance.core, 0, 0.95);
+
+  // halo first, capped at `glow` so it can never out-shine the block
+  var g = c.createRadialGradient(mid, mid, 0, mid, mid, mid);
+  var N = 24;
+  for (var i = 0; i <= N; i++) {
+    var t = i / N;
+    var a = (t <= core ? 1 : Math.pow((1 - t) / (1 - core), k)) * appearance.glow;
+    g.addColorStop(t, 'rgba(' + rgb + ',' + a.toFixed(4) + ')');
+  }
+  c.fillStyle = g;
+  c.fillRect(0, 0, sizePx, sizePx);
+
+  // the block itself, opaque, dead centre
+  var bw = blockW / (cellW * comboSpan) * sizePx;
+  var bh = blockH / (cellH * comboSpan) * sizePx;
+  c.fillStyle = 'rgb(' + rgb + ')';
+  c.fillRect(mid - bw * 0.5, mid - bh * 0.5, bw, bh);
+}
+
+// Stamped with source-over, not 'lighter'. Everything on screen is the same
+// hue, so compositing colour C at any alpha over colour C leaves C untouched —
+// blocks stay exactly full-strength even where a neighbour's halo crosses them,
+// and two overlapping halo tails brighten the gap without ever exceeding the
+// block. No accumulation, no clipping, no hue shift, one pass.
+function drawGlowFast() {
+  if (!combo) buildComboSprite();
+
+  var span = comboSpan;
+  var dw = cellW * span, dh = cellH * span;
+  var ox = (cellW - dw) * 0.5, oy = (cellH - dh) * 0.5;
+
+  for (var j = 0; j < simH; j++) {
+    for (var i = 0; i < simW; i++) {
+      var a = fillAlpha[i + j * simW];
+      if (a <= 0) continue;
+      ctx.globalAlpha = a;
+      ctx.drawImage(combo, i * cellW + ox, j * cellH + oy, dw, dh);
+    }
+  }
+  ctx.globalAlpha = 1;
 }
 
 function drawGlow() {
@@ -1095,17 +1159,20 @@ function render() {
   // block sits centred in its cell, leaving an even gap on all four sides
   var offX = (cellW - blockW) * 0.5, offY = (cellH - blockH) * 0.5;
 
-  // glow underneath, capped so it stays dimmer than the blocks
-  drawGlow();
+  if (CONFIG.glowMode === 'fast') {
+    // one stamp per cell draws the block and its halo together
+    drawGlowFast();
+  } else {
+    drawGlow();
 
-  // crisp blocks on top
-  ctx.fillStyle = col;
-  for (j = 0; j < simH; j++) {
-    for (i = 0; i < simW; i++) {
-      var a2 = fillAlpha[i + j * simW];
-      if (a2 <= 0) continue;
-      ctx.globalAlpha = a2;
-      ctx.fillRect(i * cellW + offX, j * cellH + offY, blockW, blockH);
+    ctx.fillStyle = col;
+    for (j = 0; j < simH; j++) {
+      for (i = 0; i < simW; i++) {
+        var a2 = fillAlpha[i + j * simW];
+        if (a2 <= 0) continue;
+        ctx.globalAlpha = a2;
+        ctx.fillRect(i * cellW + offX, j * cellH + offY, blockW, blockH);
+      }
     }
   }
 
