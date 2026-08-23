@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <meta charset="utf-8">
-<title>雨</title>
+<title>雨 · fast</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <style>
   * { margin: 0; padding: 0; }
@@ -37,23 +37,18 @@ var CONFIG = {
   // ---- 光晕 · glow ----
   // 两层分别渲染、模糊，再按权重合成为一张（权重和恒为 1，不会截断、不偏色），
   // 最后以 glow 的强度叠加。glow < 1 保证光晕永远比方块暗。
-  glowMode: 'fast',  // 'fast' = 预烘焙「方块+光晕」的合成精灵，每格盖一次就完事。
-                     //   没有离屏画布、没有全屏合成，绘制调用少三分之二。
-                     // 'rich' = 旧的双层 bloom 路径，只有需要大范围弥散辉光
-                     //   （bloomSpread 很大）时才值得
-  glow: 0.99,        // 光晕峰值亮度，占方块颜色的比例。必须 < 1
+  glow: 0.99,        // 光晕峰值亮度，占方块颜色的比例。必须 <= 1
                      //   0.9 以上时紧贴方块的一圈几乎与方块等亮
+  glowBoost: 1.0,    // 整体提亮系数。相邻光晕用覆盖而非加法叠加，重叠处偏暗，
+                     //   1.15-1.3 可以补回来
   haloMix: 0.8,      // 贴身光晕 vs 大范围辉光的配比。1 = 只要贴身的
   haloSpread: 1.2,   // 贴身光晕的直径，单位是「格」。1 = 刚好一格宽
-  bloomSpread: 3.0,  // 弥散辉光的直径，单位是「格」
+  bloomSpread: 3.0,  // 弥散辉光的直径，单位是「格」。
+                     //   ⚠ 精灵面积随它平方增长，是这个版本最大的开销来源：
+                     //   1.5 -> 全屏 1.1 倍填充，3.0 -> 4.5 倍，4.0 -> 8 倍
   core: 0.2,         // 中心平台：半径的这个比例内保持满亮度，之后才开始衰减。
                      //   要让紧贴方块的一圈与方块同亮，core 需 >= (block/pitch)/haloSpread
   falloff: 2.75,     // 平台之外的衰减曲线。1 = 线性偏亮，3 = 尾巴长而淡
-  haloRadius: 4,     // 贴身层每格的子像素数 2-4，越大圆越平滑
-  haloBlur: 0.4,     // 贴身层额外模糊，0 也可以（精灵本身已经是软的）
-  bloomBlur: 0.6,    // 弥散层额外模糊（只影响 'rich'）
-  glowBoost: 1.0,    // 只影响 'fast'：整体提亮系数。'fast' 用覆盖而非加法叠加，
-                     //   重叠处比 'rich' 略暗，1.15-1.3 可以补回来
 
   // ---- 水量 · water ----
   // 雨量和水位是分开的：雨永远按 rainRate 下，水位靠排水自动调节，
@@ -114,8 +109,8 @@ var CONFIG = {
   var D = {
     block: 4, gap: 8, maxCells: 3400,
     r: 91, g: 163, b: 181, bg: '#0a0e17', surfaceFade: 0,
-    glowMode: 'fast', glow: 0.99, haloMix: 0.8, haloSpread: 1.2, bloomSpread: 3.0,
-    core: 0.2, falloff: 2.75, haloRadius: 4, haloBlur: 0.4, bloomBlur: 0.6, glowBoost: 1.0,
+    glow: 0.99, glowBoost: 1.0, haloMix: 0.8, haloSpread: 1.2, bloomSpread: 3.0,
+    core: 0.2, falloff: 2.75,
     rainRate: 1, rainRateMax: 8, rainMaxDrops: 700,
     waterLevel: 0.55, drainSpeed: 0.12, drainBand: 3, maxParticles: 6000,
     tideAmplitude: 2, tidePeriod: 6.0, tideRainImmune: true,
@@ -225,7 +220,7 @@ function resize() {
   blockW = cellW * (BLOCK / PITCH);
   blockH = cellH * (BLOCK / PITCH);
 
-  initBloomBuffers();
+  buildComboSprite();
 
   initSimBuffers();
 }
@@ -773,9 +768,6 @@ var appearance = {
   bloomSpread: CONFIG.bloomSpread,
   core: CONFIG.core,
   falloff: CONFIG.falloff,
-  haloRadius: CONFIG.haloRadius,
-  haloBlur: CONFIG.haloBlur,
-  bloomBlur: CONFIG.bloomBlur,
   glowBoost: CONFIG.glowBoost,
 };
 
@@ -905,100 +897,10 @@ function applyWeather() {
 // ---- Render ----
 var occ = null, fillAlpha = null;
 
-// ---- Bloom buffers ----
-// Two small offscreen canvases. Drawing the water into them at a fraction of
-// screen resolution, blurring, then upscaling gives a continuous falloff for
-// almost no cost — the blur runs on a few thousand pixels, not a million.
-var haloCv, haloCtx, bloomCv, bloomCtx, composeCv, composeCtx, blurSupported = null;
-var sprite = null;
-
-function supportsFilter() {
-  if (blurSupported !== null) return blurSupported;
-  var t = document.createElement('canvas').getContext('2d');
-  t.filter = 'blur(1px)';
-  blurSupported = (t.filter === 'blur(1px)');
-  return blurSupported;
-}
-
-function initBloomBuffers() {
-  var sub = Math.max(2, Math.min(4, appearance.haloRadius | 0));
-
-  haloCv = document.createElement('canvas');
-  haloCv.width = simW * sub; haloCv.height = simH * sub;
-  haloCtx = haloCv.getContext('2d');
-
-  // the wide layer is coarser, but still needs 2 sub-pixels so a round sprite
-  // has something to land on
-  bloomCv = document.createElement('canvas');
-  bloomCv.width = simW * 2; bloomCv.height = simH * 2;
-  bloomCtx = bloomCv.getContext('2d');
-
-  composeCv = document.createElement('canvas');
-  composeCv.width = simW * sub; composeCv.height = simH * sub;
-  composeCtx = composeCv.getContext('2d');
-
-  buildSprite();
-  buildComboSprite();
-}
-
-// One radial-gradient disc, generated once. Stamping this per cell is what
-// makes the glow actually round — the shape lives in the sprite, not in the
-// blur, so it stays circular no matter how the layers are scaled.
-function buildSprite() {
-  var S = 64;
-  sprite = document.createElement('canvas');
-  sprite.width = S; sprite.height = S;
-  var sc = sprite.getContext('2d');
-
-  var mid = S * 0.5;
-  var g = sc.createRadialGradient(mid, mid, 0, mid, mid, mid);
-  var rgb = appearance.r + ',' + appearance.g + ',' + appearance.b;
-  var k = Math.max(0.2, appearance.falloff);
-  var core = clamp(appearance.core, 0, 0.95);
-
-  // Flat at full alpha out to `core`, then falls off. The centre of the sprite
-  // sits under the opaque block, so without the plateau the only part you can
-  // actually see is already well down the curve.
-  var N = 24;
-  for (var i = 0; i <= N; i++) {
-    var t = i / N;
-    var a = t <= core ? 1 : Math.pow((1 - t) / (1 - core), k);
-    g.addColorStop(t, 'rgba(' + rgb + ',' + a.toFixed(4) + ')');
-  }
-
-  sc.fillStyle = g;
-  sc.fillRect(0, 0, S, S);
-}
-
-// Stamp one round sprite per water cell into a small canvas, then optionally
-// soften it. Sprites overlap with source-over, never 'lighter' — additive
-// overlap would push the brighter channels past 1 and shift the hue.
-function paintCells(cv, c, sub, blurPx, spreadCells) {
-  c.setTransform(1, 0, 0, 1, 0, 0);
-  c.globalCompositeOperation = 'source-over';
-  c.filter = 'none';
-  c.clearRect(0, 0, cv.width, cv.height);
-
-  var d = spreadCells * sub;          // sprite diameter in small-canvas pixels
-  var half = d * 0.5;
-
-  for (var j = 0; j < simH; j++) {
-    for (var i = 0; i < simW; i++) {
-      var a = fillAlpha[i + j * simW];
-      if (a <= 0) continue;
-      c.globalAlpha = a;
-      c.drawImage(sprite, (i + 0.5) * sub - half, (j + 0.5) * sub - half, d, d);
-    }
-  }
-  c.globalAlpha = 1;
-
-  if (blurPx > 0 && supportsFilter()) {
-    c.filter = 'blur(' + blurPx + 'px)';
-    c.drawImage(cv, 0, 0);
-    c.filter = 'none';
-  }
-}
-
+// ---- Glow sprite ----
+// Everything on screen is one colour at one brightness, so the whole per-cell
+// appearance — block plus halo — bakes into a single sprite, built once and
+// stamped per cell. No offscreen passes, no full-screen composite.
 // ---- fast path: one baked "block + halo" sprite, stamped once per cell ----
 var combo = null, comboSpan = 0, comboScale = 1;
 
@@ -1075,56 +977,6 @@ function drawGlowFast() {
   ctx.globalAlpha = 1;
 }
 
-function drawGlow() {
-  var strength = appearance.glow;
-  if (strength <= 0) return;
-
-  var sub = Math.max(2, Math.min(4, appearance.haloRadius | 0));
-  var wHalo = clamp(appearance.haloMix, 0, 1);
-  var wBloom = 1 - wHalo;   // the two weights sum to 1 — no clipping, no hue shift
-
-  paintCells(haloCv, haloCtx, sub, appearance.haloBlur, appearance.haloSpread);
-
-  // When the wide layer carries no weight there is nothing to merge, so skip
-  // both its sprite pass and the compose canvas and blit the halo straight to
-  // the screen. Painting it anyway and then multiplying by zero was costing a
-  // full extra pass per frame — the single biggest thing the quality governor
-  // was failing to actually switch off.
-  if (wBloom < 0.002) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = strength;
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(haloCv, 0, 0, W, H);
-    ctx.restore();
-    return;
-  }
-
-  paintCells(bloomCv, bloomCtx, 2, appearance.bloomBlur, appearance.bloomSpread);
-
-  composeCtx.setTransform(1, 0, 0, 1, 0, 0);
-  composeCtx.globalCompositeOperation = 'source-over';
-  composeCtx.clearRect(0, 0, composeCv.width, composeCv.height);
-  composeCtx.imageSmoothingEnabled = true;
-
-  composeCtx.globalAlpha = wHalo;
-  composeCtx.drawImage(haloCv, 0, 0);
-  composeCtx.globalCompositeOperation = 'lighter';
-  composeCtx.globalAlpha = wBloom;
-  composeCtx.drawImage(bloomCv, 0, 0, composeCv.width, composeCv.height);
-  composeCtx.globalAlpha = 1;
-  composeCtx.globalCompositeOperation = 'source-over';
-
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  ctx.globalAlpha = strength;
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(composeCv, 0, 0, W, H);
-  ctx.restore();
-}
-
 function render() {
   ctx.fillStyle = CONFIG.bg;
   ctx.fillRect(0, 0, W, H);
@@ -1179,22 +1031,8 @@ function render() {
   // block sits centred in its cell, leaving an even gap on all four sides
   var offX = (cellW - blockW) * 0.5, offY = (cellH - blockH) * 0.5;
 
-  if (CONFIG.glowMode === 'fast') {
-    // one stamp per cell draws the block and its halo together
-    drawGlowFast();
-  } else {
-    drawGlow();
-
-    ctx.fillStyle = col;
-    for (j = 0; j < simH; j++) {
-      for (i = 0; i < simW; i++) {
-        var a2 = fillAlpha[i + j * simW];
-        if (a2 <= 0) continue;
-        ctx.globalAlpha = a2;
-        ctx.fillRect(i * cellW + offX, j * cellH + offY, blockW, blockH);
-      }
-    }
-  }
+  // one stamp per cell draws the block and its halo together
+  drawGlowFast();
 
   ctx.globalAlpha = 1;
 
@@ -1221,7 +1059,8 @@ function stats() {
     pressureIters: numPressureIters,
     particleIters: numParticleIters,
     dpr: dpr,
-    blurSupported: supportsFilter()
+    sprite: combo ? combo.width : 0,
+    span: +comboSpan.toFixed(2)
   };
 }
 window.rainStats = stats;   // 控制台里随时敲 rainStats()
@@ -1232,7 +1071,8 @@ function drawStats() {
     st.fps + ' fps   ' + st.msAvg + ' ms (peak ' + st.msWorst + ')',
     'quality ' + st.quality.toFixed(2) + '   iters ' + st.pressureIters + '/' + st.particleIters,
     st.grid + ' = ' + st.cells + ' cells   dpr ' + st.dpr,
-    st.particles + ' particles   ' + st.drops + ' drops' + (st.blurSupported ? '' : '   no blur')
+    st.particles + ' particles   ' + st.drops + ' drops',
+    'sprite ' + st.sprite + 'px   span ' + st.span + ' cells'
   ];
 
   ctx.save();
@@ -1276,10 +1116,17 @@ function applyQuality() {
   numPressureIters = Math.max(8, Math.round(CONFIG.pressureIters * q));
   numParticleIters = Math.max(1, Math.round(CONFIG.particleIters * q));
 
-  // below 0.7 the wide bloom layer goes; it costs a full extra small-canvas
-  // pass and its absence is far less visible than a stuttering frame
-  appearance.haloMix = q < 0.7 ? 1 : CONFIG.haloMix;
-  appearance.haloRadius = q < 0.5 ? 2 : CONFIG.haloRadius;
+  // This path is fill-rate bound, not call bound: each stamp covers
+  // bloomSpread^2 cells' worth of pixels. Shrinking the ambient reach is the
+  // only render lever that actually buys frame time here.
+  var span = q < 0.7 ? CONFIG.bloomSpread * 0.55
+           : q < 0.9 ? CONFIG.bloomSpread * 0.8
+           : CONFIG.bloomSpread;
+  span = Math.max(CONFIG.haloSpread, span);
+  if (span !== appearance.bloomSpread) {
+    appearance.bloomSpread = span;
+    if (cellW) buildComboSprite();
+  }
 }
 
 function governQuality(frameSec) {
@@ -1301,7 +1148,6 @@ function governQuality(frameSec) {
 
   if (quality !== before) {
     applyQuality();
-    if (appearance.haloRadius !== haloCv.width / simW) initBloomBuffers();
     qualityCooldown = 45;                        // let it settle before judging again
   }
 }
