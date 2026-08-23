@@ -86,6 +86,7 @@ var CONFIG = {
   // ---- 性能 · performance ----
   // 物理时间跟着真实时间走，所以帧率低时水不会变成慢动作。
   // 帧率持续跟不上时自动降低求解精度和光晕层数，画质换流畅。
+  showStats: false,  // true = 左上角显示帧率读数。也可以在网址后面加 ?fps=1 临时打开
   autoQuality: true, // false = 永远用满配，慢机器上就慢着
   targetFps: 52,     // 低于这个就开始降级，明显高于它才升回来
   minQuality: 0.35,  // 最多降到多少（0.35 大约是一半的求解量 + 单层光晕）
@@ -112,7 +113,7 @@ var CONFIG = {
     rainRate: 1, rainRateMax: 8, rainMaxDrops: 700,
     waterLevel: 0.55, drainSpeed: 0.12, drainBand: 3, maxParticles: 6000,
     tideAmplitude: 2, tidePeriod: 6.0, tideRainImmune: true,
-    autoQuality: true, targetFps: 52, minQuality: 0.35,
+    showStats: false, autoQuality: true, targetFps: 52, minQuality: 0.35,
     dragStrength: 26, dragRadius: 3.2, dragMaxSpeed: 40,
     rainImmune: true, rainDiscrete: true, rainSpread: 4,
     gravity: 20, gravityFloor: 0.2,
@@ -1092,6 +1093,64 @@ function render() {
   }
 
   ctx.globalAlpha = 1;
+
+  if (SHOW_STATS) drawStats();
+}
+
+var SHOW_STATS = CONFIG.showStats;
+try {
+  var qp = new URLSearchParams(location.search).get('fps');
+  if (qp === '1' || qp === 'true') SHOW_STATS = true;
+  if (qp === '0') SHOW_STATS = false;
+} catch (e) {}
+
+function stats() {
+  return {
+    fps: +(1 / frameAvg).toFixed(1),
+    msAvg: +(frameAvg * 1000).toFixed(2),
+    msWorst: +(frameWorstShown * 1000).toFixed(2),
+    quality: +quality.toFixed(2),
+    cells: simW * simH,
+    grid: simW + 'x' + simH,
+    particles: nP,
+    drops: nRain,
+    pressureIters: numPressureIters,
+    particleIters: numParticleIters,
+    dpr: dpr,
+    blurSupported: supportsFilter()
+  };
+}
+window.rainStats = stats;   // 控制台里随时敲 rainStats()
+
+function drawStats() {
+  var st = stats();
+  var lines = [
+    st.fps + ' fps   ' + st.msAvg + ' ms (peak ' + st.msWorst + ')',
+    'quality ' + st.quality.toFixed(2) + '   iters ' + st.pressureIters + '/' + st.particleIters,
+    st.grid + ' = ' + st.cells + ' cells   dpr ' + st.dpr,
+    st.particles + ' particles   ' + st.drops + ' drops' + (st.blurSupported ? '' : '   no blur')
+  ];
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.font = '11px -apple-system, "SF Mono", Menlo, monospace';
+  ctx.textBaseline = 'top';
+
+  var pad = 6, lh = 14, top = 8;
+  var wMax = 0;
+  for (var i = 0; i < lines.length; i++) wMax = Math.max(wMax, ctx.measureText(lines[i]).width);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(6, top, wMax + pad * 2, lines.length * lh + pad * 2);
+
+  // green while comfortably above target, amber when the governor is cutting back
+  ctx.fillStyle = st.fps >= CONFIG.targetFps ? 'rgba(140,220,235,0.95)'
+                : st.quality > CONFIG.minQuality ? 'rgba(230,190,120,0.95)'
+                : 'rgba(235,140,140,0.95)';
+  for (var j = 0; j < lines.length; j++)
+    ctx.fillText(lines[j], 6 + pad, top + pad + j * lh);
+  ctx.restore();
 }
 
 // ---- Frame pacing & automatic quality ----
@@ -1102,6 +1161,9 @@ function render() {
 
 var lastTs = 0;
 var frameAvg = 1 / 60;
+var frameWorst = 0;      // slowest frame in the current second
+var frameWorstShown = 0;
+var statsClock = 0;
 var quality = 1;
 var qualityCooldown = 0;
 
@@ -1117,9 +1179,14 @@ function applyQuality() {
 }
 
 function governQuality(frameSec) {
-  if (!CONFIG.autoQuality) return;
-
   frameAvg += (frameSec - frameAvg) * 0.05;      // slow EMA, ignores single spikes
+
+  // track the worst frame per second separately — an average hides hitches
+  if (frameSec > frameWorst) frameWorst = frameSec;
+  statsClock += frameSec;
+  if (statsClock >= 1) { frameWorstShown = frameWorst; frameWorst = 0; statsClock = 0; }
+
+  if (!CONFIG.autoQuality) return;
   if (qualityCooldown > 0) { qualityCooldown--; return; }
 
   var fps = 1 / frameAvg;
