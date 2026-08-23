@@ -89,11 +89,11 @@ var CONFIG = {
   // 帧率持续跟不上时自动降低求解精度和光晕层数，画质换流畅。
   showStats: false,  // true = 左上角显示帧率读数。也可以在网址后面加 ?fps=1 临时打开
   autoQuality: true, // false = 永远用满配，慢机器上就慢着
-  targetFps: 52,     // 低于这个就开始降级，明显高于它才升回来
+  targetFps: 30,     // 低于这个就开始降级，明显高于它才升回来
   minQuality: 0.35,  // 最多降到多少（0.35 大约是一半的求解量 + 单层光晕）
 
   // ---- 手感 · feel ----
-  gravity: 20,       // 重力大小。手机竖直时的满值；越平躺越接近 0
+  gravity: 25,       // 重力大小。手机竖直时的满值；越平躺越接近 0
   gravityFloor: 0.2, // 手机接近水平时保留的最小重力，占 gravity 的比例。
                      //   0 = 完全失重（水会飘着不动）
   flipRatio: 0.95,   // 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
@@ -1052,6 +1052,10 @@ function stats() {
     msAvg: +(frameAvg * 1000).toFixed(2),
     msWorst: +(frameWorstShown * 1000).toFixed(2),
     quality: +quality.toFixed(2),
+    atFloor: quality <= CONFIG.minQuality + 1e-6,
+    simMs: +(simMs).toFixed(2),
+    renderMs: +(renderMs).toFixed(2),
+    otherMs: +Math.max(0, frameAvg * 1000 - simMs - renderMs).toFixed(2),
     cells: simW * simH,
     grid: simW + 'x' + simH,
     particles: nP,
@@ -1069,7 +1073,9 @@ function drawStats() {
   var st = stats();
   var lines = [
     st.fps + ' fps   ' + st.msAvg + ' ms (peak ' + st.msWorst + ')',
-    'quality ' + st.quality.toFixed(2) + '   iters ' + st.pressureIters + '/' + st.particleIters,
+    'sim ' + st.simMs + '   render ' + st.renderMs + '   idle ' + st.otherMs,
+    'quality ' + st.quality.toFixed(2) + (st.atFloor ? ' (floor)' : '') +
+      '   iters ' + st.pressureIters + '/' + st.particleIters,
     st.grid + ' = ' + st.cells + ' cells   dpr ' + st.dpr,
     st.particles + ' particles   ' + st.drops + ' drops',
     'sprite ' + st.sprite + 'px   span ' + st.span + ' cells'
@@ -1105,6 +1111,7 @@ function drawStats() {
 
 var lastTs = 0;
 var frameAvg = 1 / 60;
+var simMs = 0, renderMs = 0;   // smoothed split of where the frame actually goes
 var frameWorst = 0;      // slowest frame in the current second
 var frameWorstShown = 0;
 var statsClock = 0;
@@ -1163,9 +1170,17 @@ function loop(ts) {
 
   governQuality(frameSec);
 
+  // split the frame so it's obvious which half to attack. 'idle' is whatever
+  // the browser spends outside our code — compositing, vsync wait, GC.
+  var t0 = performance.now();
   applyWeather();
   simulate();
+  var t1 = performance.now();
   render();
+  var t2 = performance.now();
+  simMs += ((t1 - t0) - simMs) * 0.05;
+  renderMs += ((t2 - t1) - renderMs) * 0.05;
+
   requestAnimationFrame(loop);
 }
 
