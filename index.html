@@ -11,7 +11,7 @@
     -webkit-user-select: none;
     user-select: none;
   }
-  canvas { display: block; width: 100vw; height: 100vh; }
+  canvas { display: block; position: fixed; top: 0; left: 0; }
   #gyro-btn {
     position: fixed; bottom: 15%; left: 50%; transform: translateX(-50%);
     background: rgba(91,163,181,0.15); border: 1px solid rgba(91,163,181,0.4);
@@ -25,10 +25,93 @@
 <script>
 'use strict';
 
+// ============================================================
+//  ⚙  可调参数 — 所有能改画面和手感的东西都在这一块
+//     TUNABLES — everything that changes look or feel lives here
+// ============================================================
+
+var CONFIG = {
+
+  // ---- 像素格 · grid ----
+  block: 4,          // 方块边长（CSS 像素）  block size in px
+  gap: 8,            // 方块之间的缝隙        gap between blocks in px
+  maxCells: 3400,    // 格子数上限，卡顿就调小 lower this if the phone stutters
+
+  // ---- 颜色 · colour ----
+  r: 91, g: 163, b: 181,   // 水色，默认 #5ba3b5
+  bg: '#0a0e17',           // 背景色
+  surfaceFade: 0,          // 0 = 颜色完全均匀；0.3-0.5 = 水面边缘柔化
+
+  // ---- 光晕 · glow ----
+  // 两层分别渲染、模糊，再按权重合成为一张（权重和恒为 1，不会截断、不偏色），
+  // 最后以 glow 的强度叠加。glow < 1 保证光晕永远比方块暗。
+  glow: 0.99,        // 光晕峰值亮度，占方块颜色的比例。必须 < 1
+                     //   0.9 以上时紧贴方块的一圈几乎与方块等亮
+  haloMix: 0.8,      // 贴身光晕 vs 大范围辉光的配比。1 = 只要贴身的
+  haloSpread: 1.2,   // 贴身光晕的直径，单位是「格」。1 = 刚好一格宽
+  bloomSpread: 3.0,  // 弥散辉光的直径，单位是「格」
+  core: 0.2,         // 中心平台：半径的这个比例内保持满亮度，之后才开始衰减。
+                     //   要让紧贴方块的一圈与方块同亮，core 需 >= (block/pitch)/haloSpread
+  falloff: 2.75,     // 平台之外的衰减曲线。1 = 线性偏亮，3 = 尾巴长而淡
+  haloRadius: 4,     // 贴身层每格的子像素数 2-4，越大圆越平滑
+  haloBlur: 0.4,     // 贴身层额外模糊，0 也可以（精灵本身已经是软的）
+  bloomBlur: 0.6,    // 弥散层额外模糊
+
+  // ---- 水量 · water ----
+  // 雨量和水位是分开的：雨永远按 rainRate 下，水位靠排水自动调节，
+  // 多了就多排、少了就少排，所以调 rainRate 只改雨的密度，不改水面高度。
+  rainRate: 1,       // 每帧从顶部落下的雨滴数，可以是小数。
+                     //   0.2 = 每 5 帧一颗（约每秒 12 颗），1 稀疏，4 中等，8 密集
+  rainRateMax: 8,    // rainRate 的硬上限，写再大也不会超过
+  rainMaxDrops: 700, // 空中同时存在的雨滴上限。满了就暂停生成，
+                     //   这是防止「雨落得比排水快、水位涨到屏顶」的主要闸门
+  waterLevel: 0.55,  // 水面高度，0 = 顶部，1 = 底部。初始水量和目标水量都由它决定
+  drainSpeed: 0.12,  // 水位回到目标值的快慢。太大水面会一跳一跳
+  drainBand: 3,      // 底部多少格内的水可以被排走。太窄会限制最大排水量
+  maxParticles: 6000,
+
+  // ---- 潮汐 · tide ----
+  // 垂直于重力方向的正弦加速度。重力朝下时是左右摇，手机侧过来时会自动
+  // 变成沿着新的水面方向摇。用的是力而不是直接位移，所以水会真的爬坡、
+  // 回落、拍打边缘，而不是整块平移。
+  tideAmplitude: 2,  // 摇晃力度，和 gravity 同单位。0 = 关闭。
+                     //   gravity 的 20% 左右是很明显的晃动
+  tidePeriod: 6.0,   // 一个完整来回的秒数。越小越急促。
+                     //   注意水池本身有固有周期（当前网格约 6 秒），设在附近
+                     //   会共振、摆幅放大数倍；想要克制的晃动就避开它
+  tideRainImmune: true,  // true = 下落中的雨滴不受潮汐影响
+
+  // ---- 交互 · interaction ----
+  // 重力只由陀螺仪决定。拖拽不再改变重力，只在手指划过的瞬间推动水体。
+  dragStrength: 26,  // 拖拽推水的力度
+  dragRadius: 3.2,   // 拖拽影响的半径，单位是「格」
+  dragMaxSpeed: 40,  // 单次拖拽能给出的最大速度，防止甩太狠
+  rainImmune: true,  // true = 正在下落的雨滴不受拖拽影响
+  rainDiscrete: true,// true = 下落中的雨滴各自独立：不互推、不进网格、不参与压力，
+                     //   所以是一颗一颗分开的方块，落进水体的瞬间才并入流体
+  rainSpread: 4,     // 生成时在纵向铺开几格，避免一帧的雨排成一条横线
+
+ // ---- 手感 · feel ----
+  gravity: 20,       // 重力大小（陀螺仪未启用时的默认向下重力）
+  tiltRange: 18,     // 陀螺仪能产生的最大横向重力
+  flipRatio: 0.95,  // 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
+  pressureIters: 25, // 越高水越不可压缩，越贵
+  particleIters: 3,  // 粒子互推的迭代次数
+  driftK: 1.0,       // 密度补偿
+};
+
+
+// ============================================================
+//  以下是实现，一般不需要改
+//  Implementation below — you shouldn't need to touch it
+// ============================================================
+
 var canvas = document.getElementById('c');
 var ctx = canvas.getContext('2d');
-var W, H, CELL = 10, GAP = 0, STEP = CELL + GAP;
-var displayCols, displayRows;
+
+var BLOCK = CONFIG.block, GAP = CONFIG.gap;
+var W, H, PITCH = BLOCK + GAP;
+var cellW, cellH, blockW, blockH, dpr = 1;
 
 // ============================================================
 // FLIP fluid — following the step order in lib.rs:
@@ -45,20 +128,22 @@ var FLUID = 0, AIR = 1, SOLID = 2;
 
 // --- solver params ---
 var dt = 1 / 60;
-var numPressureIters = 30;
-var numParticleIters = 2;
+var numPressureIters = CONFIG.pressureIters;
+var numParticleIters = CONFIG.particleIters;
 var overRelax = 1.9;
-var flipRatio = 0.9;
+var flipRatio = CONFIG.flipRatio;
 var compensateDrift = true;
-var driftK = 1.0;
+var driftK = CONFIG.driftK;
 
 // --- particles ---
-var maxP = 3000;
+var maxP = CONFIG.maxParticles;
 var nP = 0;
 var px = new Float32Array(maxP);
 var py = new Float32Array(maxP);
 var pvx = new Float32Array(maxP);
 var pvy = new Float32Array(maxP);
+// 0 = part of the body, 1 = still falling as rain (exempt from drag)
+var pTag = new Uint8Array(maxP);
 
 // particle radius is now tied to the seeding spacing (lib.rs: r = 0.3*h, dx = 2r)
 var pRadius = 0.3 * h;
@@ -69,6 +154,7 @@ var numCellParticles, firstCellParticle, cellParticleIds;
 
 // rest density is measured once, on the first frame, from the seeded state
 var particleRestDensity = 0.0;
+var targetP = 0;   // body size the drain regulates towards
 
 // safety clamp only — with the prevU fix this should almost never fire
 var MAX_SPEED = 20.0;
@@ -77,16 +163,36 @@ function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
 
 function resize() {
   W = window.innerWidth; H = window.innerHeight;
-  canvas.width = W; canvas.height = H;
-  displayCols = Math.max(1, Math.floor(W / STEP));
-  displayRows = Math.max(1, Math.floor(H / STEP));
 
-  // keep cell count roughly constant, match the screen aspect so the
-  // fluid isn't stretched
-  var targetCells = 950;
-  var aspect = displayCols / displayRows;
-  simH = Math.max(12, Math.round(Math.sqrt(targetCells / aspect)));
-  simW = Math.max(12, Math.round(simH * aspect));
+  // Back the canvas with real device pixels so blocks aren't blurry on phones,
+  // and pin the CSS size to the same numbers we drew with, so nothing stretches.
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // The sim grid IS the display grid — one simulation cell draws one block.
+  // That way every interior cell holds ~restDensity particles and can never
+  // come out empty, which is what produced the black speckles.
+  simW = Math.max(12, Math.round(W / PITCH));
+  simH = Math.max(12, Math.round(H / PITCH));
+
+  // Cap total cells so slower phones keep 60fps; the grid coarsens (blocks and
+  // gaps both grow proportionally) rather than dropping frames.
+  var MAX_CELLS = CONFIG.maxCells;
+  while (simW * simH > MAX_CELLS) {
+    simW = Math.max(12, Math.round(simW * 0.94));
+    simH = Math.max(12, Math.round(simH * 0.94));
+  }
+
+  cellW = W / simW;
+  cellH = H / simH;
+  blockW = cellW * (BLOCK / PITCH);
+  blockH = cellH * (BLOCK / PITCH);
+
+  initBloomBuffers();
 
   initSimBuffers();
 }
@@ -127,7 +233,7 @@ function seed() {
   var dy = Math.sqrt(3.0) / 2.0 * dx;
   var minX = 1.0 + pRadius, maxX = (simW - 1) - pRadius;
   var minY = 1.0 + pRadius, maxY = (simH - 1) - pRadius;
-  var startY = minY + (maxY - minY) * 0.55;
+  var startY = minY + (maxY - minY) * CONFIG.waterLevel;
 
   var row = 0;
   for (var y = startY; y <= maxY; y += dy, row++) {
@@ -135,18 +241,44 @@ function seed() {
       if (nP >= maxP - 200) return;   // headroom for touch-added drops
       px[nP] = x; py[nP] = y;
       pvx[nP] = 0; pvy[nP] = 0;
+      pTag[nP] = 0;
       nP++;
     }
   }
+  // the pool we just laid down IS the target volume the drain aims to hold
+  targetP = nP;
 }
 
-var gx = 0, gy = 12;
+var gx = 0, gy = CONFIG.gravity;
 
 // ---- 1. integrate ----
+var simTime = 0;
+var tideX = 0, tideY = 0;
+
+// Sinusoidal acceleration at right angles to gravity, so the sway always runs
+// along the water's surface no matter how the phone is held.
+function updateTide(sdt) {
+  simTime += sdt;
+  var amp = CONFIG.tideAmplitude;
+  if (amp <= 0 || CONFIG.tidePeriod <= 0) { tideX = tideY = 0; return; }
+
+  var gLen = Math.sqrt(gx * gx + gy * gy);
+  var ux, uy;
+  if (gLen < 1e-4) { ux = 1; uy = 0; }        // no gravity: fall back to horizontal
+  else { ux = -gy / gLen; uy = gx / gLen; }   // rotate gravity 90 degrees
+
+  var a = Math.sin(simTime * 2 * Math.PI / CONFIG.tidePeriod) * amp;
+  tideX = ux * a;
+  tideY = uy * a;
+}
+
 function integrateParticles(sdt) {
+  var rainSkipsTide = CONFIG.tideRainImmune;
   for (var i = 0; i < nP; i++) {
-    pvx[i] += sdt * gx;
-    pvy[i] += sdt * gy;
+    var ax = gx, ay = gy;
+    if (!(rainSkipsTide && pTag[i] === 1)) { ax += tideX; ay += tideY; }
+    pvx[i] += sdt * ax;
+    pvy[i] += sdt * ay;
     px[i] += pvx[i] * sdt;
     py[i] += pvy[i] * sdt;
   }
@@ -195,6 +327,9 @@ function pushParticlesApart(numIters) {
           for (var k = f; k < l; k++) {
             var id = cellParticleIds[k];
             if (id === i) continue;
+            // a falling drop neither pushes nor is pushed — that is what keeps
+            // the rain from clumping into streaks on the way down
+            if (CONFIG.rainDiscrete && (pTag[i] === 1 || pTag[id] === 1)) continue;
             var dx = px[id] - px[i], dy = py[id] - py[i];
             var d2 = dx * dx + dy * dy;
             if (d2 > minDist2 || d2 === 0.0) continue;
@@ -233,6 +368,7 @@ function transferToGrid() {
     cellType[i] = (s[i] === 0.0) ? SOLID : AIR;
 
   for (i = 0; i < nP; i++) {
+    if (CONFIG.rainDiscrete && pTag[i] === 1) continue;   // a drop in flight is not fluid yet
     var ci = clamp(Math.floor(px[i]), 0, simW - 1);
     var cj = clamp(Math.floor(py[i]), 0, simH - 1);
     var idx = ci + cj * simW;
@@ -285,6 +421,9 @@ function updateParticleDensity() {
   var h2 = 0.5 * h;
 
   for (var p = 0; p < nP; p++) {
+    // drops in flight must not contribute density, or a cluster of them would
+    // read as "body" and retire each other in mid-air
+    if (CONFIG.rainDiscrete && pTag[p] === 1) continue;
     var x = clamp(px[p], h, (simW - 1) * h);
     var y = clamp(py[p], h, (simH - 1) * h);
 
@@ -315,6 +454,31 @@ function updateParticleDensity() {
 // ---- 6. pressure solve ----
 // prevU/prevV are snapshotted HERE — the FLIP delta must be
 // (after pressure) - (after transfer), within the same frame.
+// A rain drop stops counting as rain once it lands in a cell that is already
+// carrying roughly body density — at that point it is part of the water and
+// should respond to drags like everything else.
+function retireLandedRain() {
+  if (particleRestDensity <= 0) return;
+  var thresh = particleRestDensity * 0.35;
+  for (var i = 0; i < nP; i++) {
+    if (pTag[i] === 0) continue;
+    var ci = px[i] | 0, cj = py[i] | 0;
+    if (ci < 0 || ci >= simW || cj < 0 || cj >= simH) continue;
+    var idx = ci + cj * simW;
+
+    // joins the body when it lands in water, touches the surface from above,
+    // or reaches the floor — without the last two a discrete drop would fall
+    // straight through the pool and pile up at the bottom
+    var landed =
+      particleDensity[idx] >= thresh ||
+      cellType[idx] === FLUID ||
+      (cj + 1 < simH && cellType[idx + simW] === FLUID) ||
+      py[i] > simH - 2.2;
+
+    if (landed) pTag[i] = 0;
+  }
+}
+
 function solveIncompressibility() {
   prevU.set(u); prevV.set(v);
 
@@ -385,6 +549,7 @@ function transferToParticles() {
   var maxSp2 = MAX_SPEED * MAX_SPEED;
 
   for (var p = 0; p < nP; p++) {
+    if (CONFIG.rainDiscrete && pTag[p] === 1) continue;   // free fall, no grid feedback
     var x = px[p], y = py[p] - 0.5;
     var i0 = clamp(Math.floor(x), 0, simW - 2), j0 = clamp(Math.floor(y), 0, simH - 2);
     var fx = clamp(x - i0, 0, 1), fy = clamp(y - j0, 0, 1);
@@ -414,6 +579,7 @@ function transferToParticles() {
 }
 
 function simulate() {
+  updateTide(dt);
   integrateParticles(dt);
   pushParticlesApart(numParticleIters);
   handleParticleCollisions();
@@ -421,6 +587,7 @@ function simulate() {
   handleParticleCollisions();
   transferToGrid();
   updateParticleDensity();
+  retireLandedRain();
   solveIncompressibility();
   extrapolateVelocities();
   transferToParticles();
@@ -432,8 +599,8 @@ var gyroActive = false;
 function handleOri(e) {
   var beta = clamp(e.beta || 0, -90, 90);
   var gamma = clamp(e.gamma || 0, -90, 90);
-  gx = gamma / 90 * 18;
-  gy = clamp(beta / 90 * 18 + 6, 1, 26);
+  gx = gamma / 90 * CONFIG.tiltRange;
+  gy = clamp(beta / 90 * CONFIG.tiltRange + CONFIG.gravity * 0.5, 1, CONFIG.gravity * 2.2);
 }
 function hideBtn() {
   gyroActive = true;
@@ -455,141 +622,354 @@ function activateGyro() {
 gyroBtn.addEventListener('click', function (e) { e.stopPropagation(); activateGyro(); });
 gyroBtn.addEventListener('touchend', function (e) { e.preventDefault(); e.stopPropagation(); activateGyro(); });
 
-// ---- Touch/mouse → control gravity direction ----
-var dragActive = false;
-var dragStartX = 0, dragStartY = 0;
-var baseGx = 0, baseGy = 12;
+// ---- Touch/mouse → momentary impulse on the water ----
+// Gravity belongs to the gyroscope alone. A drag no longer tilts the world; it
+// shoves the water it passes through, and only while the finger is moving.
 
-function updateGravityFromDrag(sx, sy) {
-  var dx = (sx - W * 0.5) / (W * 0.5);
-  var dy = (sy - H * 0.5) / (H * 0.5);
-  gx = dx * 18;
-  gy = clamp(dy * 18 + 6, 1, 26);
+var pointerDown = false;
+var lastPX = 0, lastPY = 0, hasLast = false;
+
+function stir(sx, sy, dxPx, dyPx) {
+  var len = Math.sqrt(dxPx * dxPx + dyPx * dyPx);
+  if (len < 0.5) return;                     // a still finger does nothing
+
+  // screen px -> sim cells, and per-frame delta -> velocity
+  var cx = sx / W * simW, cy = sy / H * simH;
+  var dirX = dxPx / len, dirY = dyPx / len;
+
+  var speed = Math.min(len / cellW * CONFIG.dragStrength * 0.1, CONFIG.dragMaxSpeed);
+  var rad = CONFIG.dragRadius, rad2 = rad * rad;
+
+  for (var i = 0; i < nP; i++) {
+    if (CONFIG.rainImmune && pTag[i] === 1) continue;   // let the rain fall through
+    var ddx = px[i] - cx, ddy = py[i] - cy;
+    var d2 = ddx * ddx + ddy * ddy;
+    if (d2 > rad2) continue;
+    var f = (1 - Math.sqrt(d2) / rad);        // linear falloff from the finger
+    pvx[i] += dirX * speed * f;
+    pvy[i] += dirY * speed * f;
+  }
+}
+
+function pointerStart(sx, sy) {
+  pointerDown = true;
+  lastPX = sx; lastPY = sy; hasLast = true;
+}
+function pointerMove(sx, sy) {
+  if (!pointerDown || !hasLast) return;
+  stir(sx, sy, sx - lastPX, sy - lastPY);
+  lastPX = sx; lastPY = sy;
+}
+function pointerEnd() {
+  pointerDown = false; hasLast = false;
 }
 
 canvas.addEventListener('touchstart', function (e) {
   e.preventDefault();
-  dragActive = true;
-  updateGravityFromDrag(e.touches[0].clientX, e.touches[0].clientY);
+  pointerStart(e.touches[0].clientX, e.touches[0].clientY);
 });
 canvas.addEventListener('touchmove', function (e) {
   e.preventDefault();
-  if (dragActive) updateGravityFromDrag(e.touches[0].clientX, e.touches[0].clientY);
+  // every finger stirs; the first one also drives lastPX/lastPY
+  for (var i = 1; i < e.touches.length; i++) {
+    stir(e.touches[i].clientX, e.touches[i].clientY, e.touches[i].clientX - lastPX, e.touches[i].clientY - lastPY);
+  }
+  pointerMove(e.touches[0].clientX, e.touches[0].clientY);
 });
-canvas.addEventListener('touchend', function (e) {
-  e.preventDefault();
-  dragActive = false;
-  if (!gyroActive) { gx = 0; gy = 12; }
-});
-canvas.addEventListener('mousedown', function (e) {
-  dragActive = true;
-  updateGravityFromDrag(e.clientX, e.clientY);
-});
-canvas.addEventListener('mousemove', function (e) {
-  if (dragActive) updateGravityFromDrag(e.clientX, e.clientY);
-});
-canvas.addEventListener('mouseup', function () {
-  dragActive = false;
-  if (!gyroActive) { gx = 0; gy = 12; }
-});
+canvas.addEventListener('touchend', function (e) { e.preventDefault(); pointerEnd(); });
+canvas.addEventListener('touchcancel', function () { pointerEnd(); });
+
+canvas.addEventListener('mousedown', function (e) { pointerStart(e.clientX, e.clientY); });
+canvas.addEventListener('mousemove', function (e) { pointerMove(e.clientX, e.clientY); });
+canvas.addEventListener('mouseup', pointerEnd);
+canvas.addEventListener('mouseleave', pointerEnd);
 
 // ---- Weather & appearance (controllable) ----
 var weather = {
-  rainRate: 0,        // particles per frame from top (0 = no rain)
-  drainRate: 0.5,     // particles per frame removed from bottom
-  maxRatio: 0.5,      // max water particles as fraction of capacity
-  minRatio: 0.1,      // min water particles as fraction of capacity
+  rainRate: CONFIG.rainRate,
 };
 
 var appearance = {
-  r: 91, g: 163, b: 181,  // water color (default: 5ba3b5)
-  glow: 0.3,               // glow intensity 0-1
+  r: CONFIG.r, g: CONFIG.g, b: CONFIG.b,
+  surfaceFade: CONFIG.surfaceFade,
+  glow: CONFIG.glow,
+  haloMix: CONFIG.haloMix,
+  haloSpread: CONFIG.haloSpread,
+  bloomSpread: CONFIG.bloomSpread,
+  core: CONFIG.core,
+  falloff: CONFIG.falloff,
+  haloRadius: CONFIG.haloRadius,
+  haloBlur: CONFIG.haloBlur,
+  bloomBlur: CONFIG.bloomBlur,
 };
 
 var maxWater = maxP - 200;  // leave headroom
 
-function applyWeather() {
-  var waterMax = Math.floor(maxWater * weather.maxRatio);
-  var waterMin = Math.floor(maxWater * weather.minRatio);
+var nRain = 0;        // drops currently in flight
+var rainCarry = 0;    // fractional leftover, so rainRate can be 0.2
+var drainCarry = 0;   // same idea for the drain side
+var drainList = [];
 
-  // rain: add from top
-  if (weather.rainRate > 0 && nP < waterMax) {
-    var toAdd = Math.min(weather.rainRate, waterMax - nP);
+function applyWeather() {
+  // --- rain: unconditional, so rainRate actually controls rain density ---
+  var rate = Math.min(weather.rainRate, CONFIG.rainRateMax);
+
+  // count what is already falling; once the sky is full, hold off
+  nRain = 0;
+  for (var q = 0; q < nP; q++) if (pTag[q] === 1) nRain++;
+  var headroom = CONFIG.rainMaxDrops - nRain;
+  if (headroom <= 0) { rate = 0; rainCarry = 0; }
+
+  if (rate > 0) {
+    // accumulate fractions so rates below 1 still produce drops — 0.2 means
+    // one drop every five frames rather than none at all
+    rainCarry += rate;
+    var whole = Math.floor(rainCarry);
+    rainCarry -= whole;
+
+    var toAdd = Math.min(whole, headroom, maxWater - nP);
     for (var i = 0; i < toAdd; i++) {
       if (nP >= maxP) break;
       px[nP] = 1.5 + Math.random() * (simW - 3);
-      py[nP] = 1.5 + Math.random() * 0.5;
+      py[nP] = 1.5 + Math.random() * CONFIG.rainSpread;
       pvx[nP] = (Math.random() - 0.5) * 0.5;
       pvy[nP] = 2 + Math.random() * 3;
+      pTag[nP] = 1;
       nP++;
     }
   }
 
-  // drain: remove lowest particles
-  if (weather.drainRate > 0 && nP > waterMin) {
-    var toDrain = Math.min(Math.ceil(weather.drainRate), nP - waterMin);
-    // find the lowest particles (highest y)
-    for (var d = 0; d < toDrain; d++) {
-      var lowestIdx = -1, lowestY = -1;
-      for (var i = 0; i < nP; i++) {
-        if (py[i] > lowestY) { lowestY = py[i]; lowestIdx = i; }
-      }
-      if (lowestIdx >= 0 && lowestY > simH - 2) {
-        // swap with last and shrink
-        nP--;
-        if (lowestIdx < nP) {
-          px[lowestIdx] = px[nP]; py[lowestIdx] = py[nP];
-          pvx[lowestIdx] = pvx[nP]; pvy[lowestIdx] = pvy[nP];
-        }
-      }
+  // --- drain: proportional controller holding the body at targetP ---
+  // Removing exactly what the rain adds would let any error persist forever,
+  // so the overshoot term is what actually pins the water level.
+  if (targetP <= 0) return;
+  var excess = nP - targetP;
+  drainCarry += rate * (excess > 0 ? 1 : 0) + excess * CONFIG.drainSpeed;
+  if (drainCarry <= 0) { drainCarry = Math.max(drainCarry, -50); return; }
+
+  var toDrain = Math.floor(drainCarry);
+  if (toDrain < 1) return;
+  drainCarry -= toDrain;
+
+  // one pass to collect candidates sitting on the floor, instead of rescanning
+  // the whole array once per removed particle
+  drainList.length = 0;
+  var floorY = simH - 2.2 - CONFIG.drainBand;
+  for (var k = 0; k < nP; k++) {
+    if (pTag[k] === 0 && py[k] > floorY) drainList.push(k);
+  }
+
+  var removed = 0;
+  for (var d = drainList.length - 1; d >= 0 && removed < toDrain; d--) {
+    var idx = drainList[d];
+    if (idx >= nP) continue;
+    nP--;
+    if (idx < nP) {
+      px[idx] = px[nP]; py[idx] = py[nP];
+      pvx[idx] = pvx[nP]; pvy[idx] = pvy[nP];
+      pTag[idx] = pTag[nP];
     }
+    removed++;
   }
 }
 
 // ---- Render ----
-var occ = null;
+var occ = null, fillAlpha = null;
 
-function render() {
-  ctx.fillStyle = '#0a0e17';
-  ctx.fillRect(0, 0, W, H);
+// ---- Bloom buffers ----
+// Two small offscreen canvases. Drawing the water into them at a fraction of
+// screen resolution, blurring, then upscaling gives a continuous falloff for
+// almost no cost — the blur runs on a few thousand pixels, not a million.
+var haloCv, haloCtx, bloomCv, bloomCtx, composeCv, composeCtx, blurSupported = null;
+var sprite = null;
 
-  var n = displayCols * displayRows;
-  if (!occ || occ.length !== n) occ = new Uint16Array(n);
-  else occ.fill(0);
+function supportsFilter() {
+  if (blurSupported !== null) return blurSupported;
+  var t = document.createElement('canvas').getContext('2d');
+  t.filter = 'blur(1px)';
+  blurSupported = (t.filter === 'blur(1px)');
+  return blurSupported;
+}
 
-  var scX = displayCols / simW, scY = displayRows / simH;
-  for (var p = 0; p < nP; p++) {
-    var dc = Math.floor(px[p] * scX);
-    var dr = Math.floor(py[p] * scY);
-    if (dc >= 0 && dc < displayCols && dr >= 0 && dr < displayRows)
-      occ[dr * displayCols + dc]++;
+function initBloomBuffers() {
+  var sub = Math.max(2, Math.min(4, appearance.haloRadius | 0));
+
+  haloCv = document.createElement('canvas');
+  haloCv.width = simW * sub; haloCv.height = simH * sub;
+  haloCtx = haloCv.getContext('2d');
+
+  // the wide layer is coarser, but still needs 2 sub-pixels so a round sprite
+  // has something to land on
+  bloomCv = document.createElement('canvas');
+  bloomCv.width = simW * 2; bloomCv.height = simH * 2;
+  bloomCtx = bloomCv.getContext('2d');
+
+  composeCv = document.createElement('canvas');
+  composeCv.width = simW * sub; composeCv.height = simH * sub;
+  composeCtx = composeCv.getContext('2d');
+
+  buildSprite();
+}
+
+// One radial-gradient disc, generated once. Stamping this per cell is what
+// makes the glow actually round — the shape lives in the sprite, not in the
+// blur, so it stays circular no matter how the layers are scaled.
+function buildSprite() {
+  var S = 64;
+  sprite = document.createElement('canvas');
+  sprite.width = S; sprite.height = S;
+  var sc = sprite.getContext('2d');
+
+  var mid = S * 0.5;
+  var g = sc.createRadialGradient(mid, mid, 0, mid, mid, mid);
+  var rgb = appearance.r + ',' + appearance.g + ',' + appearance.b;
+  var k = Math.max(0.2, appearance.falloff);
+  var core = clamp(appearance.core, 0, 0.95);
+
+  // Flat at full alpha out to `core`, then falls off. The centre of the sprite
+  // sits under the opaque block, so without the plateau the only part you can
+  // actually see is already well down the curve.
+  var N = 24;
+  for (var i = 0; i <= N; i++) {
+    var t = i / N;
+    var a = t <= core ? 1 : Math.pow((1 - t) / (1 - core), k);
+    g.addColorStop(t, 'rgba(' + rgb + ',' + a.toFixed(4) + ')');
   }
 
-  var cr = appearance.r, cg = appearance.g, cb = appearance.b;
-  var glowAmt = appearance.glow;
+  sc.fillStyle = g;
+  sc.fillRect(0, 0, S, S);
+}
 
-  for (var r = 0; r < displayRows; r++) {
-    for (var c = 0; c < displayCols; c++) {
-      var k = occ[r * displayCols + c];
-      if (k > 0) {
-        var alpha = Math.min(1, k * 0.35 + 0.35);
+// Stamp one round sprite per water cell into a small canvas, then optionally
+// soften it. Sprites overlap with source-over, never 'lighter' — additive
+// overlap would push the brighter channels past 1 and shift the hue.
+function paintCells(cv, c, sub, blurPx, spreadCells) {
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.globalCompositeOperation = 'source-over';
+  c.filter = 'none';
+  c.clearRect(0, 0, cv.width, cv.height);
 
-        // glow: draw a larger, dimmer rect behind
-        if (glowAmt > 0) {
-          var glowSize = CELL + 4;
-          var glowOffset = (glowSize - CELL) * 0.5;
-          ctx.globalAlpha = alpha * glowAmt * 0.3;
-          ctx.fillStyle = 'rgb(' + cr + ',' + cg + ',' + cb + ')';
-          ctx.fillRect(c * STEP - glowOffset, r * STEP - glowOffset, glowSize, glowSize);
-        }
+  var d = spreadCells * sub;          // sprite diameter in small-canvas pixels
+  var half = d * 0.5;
 
-        // main cell
-        ctx.globalAlpha = alpha;
-        ctx.fillStyle = 'rgb(' + cr + ',' + cg + ',' + cb + ')';
-        ctx.fillRect(c * STEP, r * STEP, CELL, CELL);
-      }
+  for (var j = 0; j < simH; j++) {
+    for (var i = 0; i < simW; i++) {
+      var a = fillAlpha[i + j * simW];
+      if (a <= 0) continue;
+      c.globalAlpha = a;
+      c.drawImage(sprite, (i + 0.5) * sub - half, (j + 0.5) * sub - half, d, d);
     }
   }
+  c.globalAlpha = 1;
+
+  if (blurPx > 0 && supportsFilter()) {
+    c.filter = 'blur(' + blurPx + 'px)';
+    c.drawImage(cv, 0, 0);
+    c.filter = 'none';
+  }
+}
+
+function drawGlow() {
+  var strength = appearance.glow;
+  if (strength <= 0) return;
+
+  var sub = Math.max(2, Math.min(4, appearance.haloRadius | 0));
+  var wHalo = clamp(appearance.haloMix, 0, 1);
+  var wBloom = 1 - wHalo;   // the two weights sum to 1 — no clipping, no hue shift
+
+  paintCells(haloCv, haloCtx, sub, appearance.haloBlur, appearance.haloSpread);
+  paintCells(bloomCv, bloomCtx, 2, appearance.bloomBlur, appearance.bloomSpread);
+
+  composeCtx.setTransform(1, 0, 0, 1, 0, 0);
+  composeCtx.globalCompositeOperation = 'source-over';
+  composeCtx.clearRect(0, 0, composeCv.width, composeCv.height);
+  composeCtx.imageSmoothingEnabled = true;
+
+  composeCtx.globalAlpha = wHalo;
+  composeCtx.drawImage(haloCv, 0, 0);
+  composeCtx.globalCompositeOperation = 'lighter';
+  composeCtx.globalAlpha = wBloom;
+  composeCtx.drawImage(bloomCv, 0, 0, composeCv.width, composeCv.height);
+  composeCtx.globalAlpha = 1;
+  composeCtx.globalCompositeOperation = 'source-over';
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = strength;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(composeCv, 0, 0, W, H);
+  ctx.restore();
+}
+
+function render() {
+  ctx.fillStyle = CONFIG.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  if (!occ || occ.length !== numCells) {
+    occ = new Uint16Array(numCells);
+    fillAlpha = new Float32Array(numCells);
+  } else {
+    occ.fill(0);
+  }
+
+  // count particles per sim cell — one cell, one block
+  for (var p = 0; p < nP; p++) {
+    var ci = px[p] | 0, cj = py[p] | 0;
+    if (ci >= 0 && ci < simW && cj >= 0 && cj < simH) occ[ci + cj * simW]++;
+  }
+
+  // Fill is binary by default: any cell holding water gets the full colour, so
+  // the body renders as one flat tone. appearance.surfaceFade > 0 re-introduces
+  // a soft edge on thin//surface cells if you want it.
+  var rest = particleRestDensity > 0 ? particleRestDensity : 3.0;
+  var full = rest * 0.7;
+  var fade = appearance.surfaceFade || 0;
+
+  var i, j, idx;
+  for (i = 0; i < numCells; i++) {
+    var k = occ[i];
+    if (k <= 0) { fillAlpha[i] = 0; continue; }
+    fillAlpha[i] = fade > 0
+      ? (1 - fade) + fade * Math.min(1, k / full)
+      : 1;
+  }
+
+  // Close pinholes: an empty cell surrounded on 3+ sides by water is water.
+  // Cheap dilation pass that removes isolated dark specks without thickening
+  // the outer edge of the fluid.
+  for (j = 1; j < simH - 1; j++) {
+    for (i = 1; i < simW - 1; i++) {
+      idx = i + j * simW;
+      if (occ[idx] > 0) continue;
+      var n = 0, sum = 0;
+      if (occ[idx - 1] > 0)    { n++; sum += fillAlpha[idx - 1]; }
+      if (occ[idx + 1] > 0)    { n++; sum += fillAlpha[idx + 1]; }
+      if (occ[idx - simW] > 0) { n++; sum += fillAlpha[idx - simW]; }
+      if (occ[idx + simW] > 0) { n++; sum += fillAlpha[idx + simW]; }
+      if (n >= 3) fillAlpha[idx] = sum / n;
+    }
+  }
+
+  var col = 'rgb(' + appearance.r + ',' + appearance.g + ',' + appearance.b + ')';
+
+  // block sits centred in its cell, leaving an even gap on all four sides
+  var offX = (cellW - blockW) * 0.5, offY = (cellH - blockH) * 0.5;
+
+  // glow underneath, capped so it stays dimmer than the blocks
+  drawGlow();
+
+  // crisp blocks on top
+  ctx.fillStyle = col;
+  for (j = 0; j < simH; j++) {
+    for (i = 0; i < simW; i++) {
+      var a2 = fillAlpha[i + j * simW];
+      if (a2 <= 0) continue;
+      ctx.globalAlpha = a2;
+      ctx.fillRect(i * cellW + offX, j * cellH + offY, blockW, blockH);
+    }
+  }
+
   ctx.globalAlpha = 1;
 }
 
@@ -606,5 +986,8 @@ window.addEventListener('resize', function () {
   clearTimeout(rt);
   rt = setTimeout(resize, 150);
 });
+// keep the page background in step with CONFIG.bg
+document.body.style.background = CONFIG.bg;
+
 loop();
 </script>
