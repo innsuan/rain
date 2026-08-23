@@ -83,6 +83,13 @@ var CONFIG = {
                      //   所以是一颗一颗分开的方块，落进水体的瞬间才并入流体
   rainSpread: 4,     // 生成时在上游方向铺开几格，避免一帧的雨排成一条线
 
+  // ---- 性能 · performance ----
+  // 物理时间跟着真实时间走，所以帧率低时水不会变成慢动作。
+  // 帧率持续跟不上时自动降低求解精度和光晕层数，画质换流畅。
+  autoQuality: true, // false = 永远用满配，慢机器上就慢着
+  targetFps: 52,     // 低于这个就开始降级，明显高于它才升回来
+  minQuality: 0.35,  // 最多降到多少（0.35 大约是一半的求解量 + 单层光晕）
+
   // ---- 手感 · feel ----
   gravity: 20,       // 重力大小。手机竖直时的满值；越平躺越接近 0
   gravityFloor: 0.2, // 手机接近水平时保留的最小重力，占 gravity 的比例。
@@ -105,6 +112,7 @@ var CONFIG = {
     rainRate: 1, rainRateMax: 8, rainMaxDrops: 700,
     waterLevel: 0.55, drainSpeed: 0.12, drainBand: 3, maxParticles: 6000,
     tideAmplitude: 2, tidePeriod: 6.0, tideRainImmune: true,
+    autoQuality: true, targetFps: 52, minQuality: 0.35,
     dragStrength: 26, dragRadius: 3.2, dragMaxSpeed: 40,
     rainImmune: true, rainDiscrete: true, rainSpread: 4,
     gravity: 20, gravityFloor: 0.2,
@@ -145,7 +153,7 @@ var u, v, prevU, prevV, wU, wV, s, cellType, particleDensity;
 var FLUID = 0, AIR = 1, SOLID = 2;
 
 // --- solver params ---
-var dt = 1 / 60;
+var dt = 1 / 60;            // rewritten every frame from the real clock
 var numPressureIters = CONFIG.pressureIters;
 var numParticleIters = CONFIG.particleIters;
 var overRelax = 1.9;
@@ -1086,7 +1094,58 @@ function render() {
   ctx.globalAlpha = 1;
 }
 
-function loop() {
+// ---- Frame pacing & automatic quality ----
+// Two separate jobs. Pacing keeps the water moving at the right speed even at
+// 30fps — with a fixed dt a slow phone plays everything in slow motion. The
+// governor then buys frame time back by spending less on the parts that show
+// the least: solver iterations first, then the second glow layer.
+
+var lastTs = 0;
+var frameAvg = 1 / 60;
+var quality = 1;
+var qualityCooldown = 0;
+
+function applyQuality() {
+  var q = quality;
+  numPressureIters = Math.max(8, Math.round(CONFIG.pressureIters * q));
+  numParticleIters = Math.max(1, Math.round(CONFIG.particleIters * q));
+
+  // below 0.7 the wide bloom layer goes; it costs a full extra small-canvas
+  // pass and its absence is far less visible than a stuttering frame
+  appearance.haloMix = q < 0.7 ? 1 : CONFIG.haloMix;
+  appearance.haloRadius = q < 0.5 ? 2 : CONFIG.haloRadius;
+}
+
+function governQuality(frameSec) {
+  if (!CONFIG.autoQuality) return;
+
+  frameAvg += (frameSec - frameAvg) * 0.05;      // slow EMA, ignores single spikes
+  if (qualityCooldown > 0) { qualityCooldown--; return; }
+
+  var fps = 1 / frameAvg;
+  var before = quality;
+
+  if (fps < CONFIG.targetFps * 0.95) quality = Math.max(CONFIG.minQuality, quality - 0.15);
+  else if (fps > CONFIG.targetFps * 1.15 && quality < 1) quality = Math.min(1, quality + 0.05);
+
+  if (quality !== before) {
+    applyQuality();
+    if (appearance.haloRadius !== haloCv.width / simW) initBloomBuffers();
+    qualityCooldown = 45;                        // let it settle before judging again
+  }
+}
+
+function loop(ts) {
+  if (!ts) ts = performance.now();
+  var frameSec = lastTs ? (ts - lastTs) / 1000 : 1 / 60;
+  lastTs = ts;
+
+  // clamp: below 1/240 the solver gains nothing, above 1/30 FLIP gets unstable.
+  // A backgrounded tab returns a huge delta, which the upper clamp absorbs.
+  dt = clamp(frameSec, 1 / 240, 1 / 30);
+
+  governQuality(frameSec);
+
   applyWeather();
   simulate();
   render();
@@ -1094,6 +1153,7 @@ function loop() {
 }
 
 resize();
+applyQuality();
 var rt;
 window.addEventListener('resize', function () {
   clearTimeout(rt);
