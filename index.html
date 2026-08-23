@@ -33,6 +33,12 @@ var CONFIG = {
   r: 91, g: 163, b: 181,   // 水色，默认 #5ba3b5
   bg: '#0a0e17',           // 背景色
   surfaceFade: 0,          // 0 = 颜色完全均匀；0.3-0.5 = 水面边缘柔化
+  minParticles: 2,         // 一格里至少几颗粒子才画方块。门槛是相对静止密度的：
+                           //   particlesPerCell 是 9 时，门槛 5-6 才相当于
+                           //   密度 3 时的门槛 2。调高会剃掉表层、轮廓更硬，
+                           //   水位看起来也会低一点
+  rainAlwaysVisible: true, // true = 空中的雨滴不受 minParticles 限制。
+                           //   一滴雨只有一颗粒子，否则门槛一上调就整个消失
 
   // ---- 光晕 · glow ----
   // 方块和它的光晕一起烘焙进一张精灵，每格盖一次。贴身层和弥散层的衰减曲线
@@ -53,9 +59,9 @@ var CONFIG = {
   // ---- 水量 · water ----
   // 雨量和水位是分开的：雨永远按 rainRate 下，水位靠排水自动调节，
   // 多了就多排、少了就少排，所以调 rainRate 只改雨的密度，不改水面高度。
-  rainRate: 0.2,     // 每帧从顶部落下的雨滴数，可以是小数。
+  rainRate: 0.1,     // 每帧从顶部落下的雨滴数，可以是小数。
                      //   0.2 = 每 5 帧一颗（约每秒 12 颗），1 稀疏，4 中等，8 密集
-  rainRateMax: 2,    // rainRate 的硬上限，写再大也不会超过
+  rainRateMax: 1,    // rainRate 的硬上限，写再大也不会超过
   rainMaxDrops: 700, // 空中同时存在的雨滴上限。满了就暂停生成，
                      //   这是防止「雨落得比排水快、水位涨到屏顶」的主要闸门
   waterLevel: 0.75,  // 水面高度，0 = 顶部，1 = 底部。初始水量和目标水量都由它决定
@@ -65,17 +71,15 @@ var CONFIG = {
                      // 粒子总数上限。particlesPerCell 调大时要一起提，否则
                      //   播种会提前截断，静止密度达不到设定值
   particlesPerCell: 9,
-                     // 一格水体由多少颗粒子构成。这决定了「一滴雨相对于水体
-                     //   有多大」：一滴雨永远是 1 颗，所以它落进一格造成的
-                     //   密度超压是 1/N —— N=3 时超压 33%，密度补偿会把周围
-                     //   的水狠狠顶开；N=8 时只有 12.5%，涟漪就小得多。
+                     // 一格水体由多少颗粒子构成。它和 rainMass 共同决定
+                     //   「一滴雨相对于一格水有多大」：当前是 0.35/9，约 1/26。
                      //   代价是粒子总数按 N 线性增长（约 1.1ms / 千颗）。
 
   // ---- 潮汐 · tide ----
   // 垂直于重力方向的正弦加速度。重力朝下时是左右摇，手机侧过来时会自动
   // 变成沿着新的水面方向摇。用的是力而不是直接位移，所以水会真的爬坡、
   // 回落、拍打边缘，而不是整块平移。
-  tideAmplitude: 2,  // 摇晃力度，和 gravity 同单位。0 = 关闭。
+  tideAmplitude: 3,  // 摇晃力度，和 gravity 同单位。0 = 关闭。
                      //   gravity 的 20% 左右是很明显的晃动
   tidePeriod: 12.0,  // 一个完整来回的秒数。越小越急促。
                      //   注意水池本身有固有周期（当前设置下约 4-5 秒），设在附近
@@ -91,28 +95,29 @@ var CONFIG = {
   rainDiscrete: true,// true = 下落中的雨滴各自独立：不互推、不进网格、不参与压力，
                      //   所以是一颗一颗分开的方块，落进水体的瞬间才并入流体
   rainSpread: 4,     // 生成时沿上游方向铺开几格，避免一帧的雨排成一条线
-  rainTerminal: 0,    // 雨滴的终端速度（格/秒）。自由落体会一路加速，落水时
-                     //   动量远大于水体本身，涟漪就会过大。这相当于空气阻力，
-                     //   同时也让雨的下落速度看起来一致。0 = 不限速
-  rainImpact: 0.25,   // 落水瞬间保留多少动量。1 = 全部注入（原来的行为），
-                     //   0.3-0.5 是明显但克制的涟漪，0.1 几乎无声
+  rainTerminal: 0,   // 雨滴的终端速度（格/秒），相当于空气阻力。0 = 不限速
+  rainImpact: 1,     // 落水瞬间保留多少动量。1 = 全部注入
+  rainMass: 0.35,    // 一滴雨的质量，水体粒子恒为 1。质量参与密度统计和网格
+                     //   传递，所以轻的雨滴只造成小超压、只注入少量动量。
+                     //   渲染不受影响，仍然是一个满色方块
+  rainMergeTime: 0.4,// 落水后质量长到 1 所需的秒数。设 0 会瞬间跳变，等于凭空
+                     //   多出体积，反而形成新的冲击
 
   // ---- 性能 · performance ----
-  // 物理时间跟着真实时间走，所以帧率低时水不会变成慢动作。
+  // 物理时间跟着真实时间走，所以帧率低时水不会变成慢动作，只是画面不流畅。
+  // 想省性能就直接调 maxCells / particlesPerCell / bloomSpread / pressureIters。
   showStats: false,  // true = 左上角显示帧率读数。也可以在网址后面加 ?fps=1 临时打开
-  autoQuality: false,// false = 永远用满配，慢机器上就慢着
-  targetFps: 52,     // 低于这个就开始降级，明显高于它才升回来
-  minQuality: 0.35,  // 最多降到多少
 
   // ---- 手感 · feel ----
-  gravity: 25,       // 重力大小。手机竖直时的满值；越平躺越接近 0
+  gravity: 30,       // 重力大小。手机竖直时的满值；越平躺越接近 0
   gravityFloor: 0.2, // 手机接近水平时保留的最小重力，占 gravity 的比例。
                      //   0 = 完全失重（水会飘着不动）
-  flipRatio: 0.925,  // 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
+  flipRatio: 0.95,   // 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
   pressureIters: 20, // 越高水越不可压缩，越贵
   particleIters: 2,  // 粒子互推的迭代次数
   driftK: 1.0,       // 密度补偿强度，防止结块和空洞
 };
+
 
 
 
@@ -161,6 +166,11 @@ var pvx = new Float32Array(maxP);
 var pvy = new Float32Array(maxP);
 // 0 = part of the body, 1 = still falling as rain (exempt from drag)
 var pTag = new Uint8Array(maxP);
+// Per-particle mass. Body particles are 1; a drop in flight carries rainMass
+// and ramps up to 1 once it merges. Mass weights both the density count and
+// the particle->grid transfer, which is what makes a light drop a small
+// perturbation instead of a full cell's worth of water appearing at once.
+var pMass = new Float32Array(maxP);
 
 // particle radius is now tied to the seeding spacing (lib.rs: r = 0.3*h, dx = 2r)
 // Particle radius sets how many fit in a cell: packing density goes as 1/r^2,
@@ -261,6 +271,7 @@ function seed() {
       px[nP] = x; py[nP] = y;
       pvx[nP] = 0; pvy[nP] = 0;
       pTag[nP] = 0;
+      pMass[nP] = 1;
       nP++;
     }
   }
@@ -295,8 +306,19 @@ function integrateParticles(sdt) {
   var rainSkipsTide = CONFIG.tideRainImmune;
   var term = CONFIG.rainTerminal, term2 = term * term;
 
+  var mergeStep = CONFIG.rainMergeTime > 0
+    ? sdt / CONFIG.rainMergeTime : 1;
+
   for (var i = 0; i < nP; i++) {
     var isRain = pTag[i] === 1;
+
+    // a landed drop grows into full volume over rainMergeTime rather than
+    // popping to mass 1 the instant it touches the surface
+    if (!isRain && pMass[i] < 1) {
+      pMass[i] += mergeStep;
+      if (pMass[i] > 1) pMass[i] = 1;
+    }
+
     var ax = gx, ay = gy;
     if (!(rainSkipsTide && isRain)) { ax += tideX; ay += tideY; }
     pvx[i] += sdt * ax;
@@ -414,7 +436,9 @@ function transferToGrid() {
     var x = px[p], y = py[p] - 0.5;
     var i0 = clamp(Math.floor(x), 0, simW - 2), j0 = clamp(Math.floor(y), 0, simH - 2);
     var fx = clamp(x - i0, 0, 1), fy = clamp(y - j0, 0, 1);
-    var w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+    var m = pMass[p];
+    var w00 = (1 - fx) * (1 - fy) * m, w10 = fx * (1 - fy) * m,
+        w01 = (1 - fx) * fy * m, w11 = fx * fy * m;
     var a = i0 + j0 * simW, b = a + 1, c = a + simW, d = c + 1;
     u[a] += w00 * pvx[p]; wU[a] += w00;
     u[b] += w10 * pvx[p]; wU[b] += w10;
@@ -425,7 +449,8 @@ function transferToGrid() {
     x = px[p] - 0.5; y = py[p];
     i0 = clamp(Math.floor(x), 0, simW - 2); j0 = clamp(Math.floor(y), 0, simH - 2);
     fx = clamp(x - i0, 0, 1); fy = clamp(y - j0, 0, 1);
-    w00 = (1 - fx) * (1 - fy); w10 = fx * (1 - fy); w01 = (1 - fx) * fy; w11 = fx * fy;
+    w00 = (1 - fx) * (1 - fy) * m; w10 = fx * (1 - fy) * m;
+    w01 = (1 - fx) * fy * m; w11 = fx * fy * m;
     a = i0 + j0 * simW; b = a + 1; c = a + simW; d = c + 1;
     v[a] += w00 * pvy[p]; wV[a] += w00;
     v[b] += w10 * pvy[p]; wV[b] += w10;
@@ -468,10 +493,12 @@ function updateParticleDensity() {
     var ty = ((y - h2) - y0 * h) / h;
     var y1 = Math.min(y0 + 1, simH - 2);
 
-    var sx = 1.0 - tx, sy = 1.0 - ty;
+    var m = pMass[p];
+    var sx = (1.0 - tx) * m, sy = 1.0 - ty;
+    var txm = tx * m;
     if (x0 < simW && y0 < simH) particleDensity[x0 + y0 * simW] += sx * sy;
-    if (x1 < simW && y0 < simH) particleDensity[x1 + y0 * simW] += tx * sy;
-    if (x1 < simW && y1 < simH) particleDensity[x1 + y1 * simW] += tx * ty;
+    if (x1 < simW && y0 < simH) particleDensity[x1 + y0 * simW] += txm * sy;
+    if (x1 < simW && y1 < simH) particleDensity[x1 + y1 * simW] += txm * ty;
     if (x0 < simW && y1 < simH) particleDensity[x0 + y1 * simW] += sx * ty;
   }
 
@@ -849,6 +876,7 @@ function spawnRainDrop(slot) {
   var drift = (Math.random() - 0.5) * 0.5;
   pvx[slot] = ux * speed + qx * drift;
   pvy[slot] = uy * speed + qy * drift;
+  pMass[slot] = clamp(CONFIG.rainMass, 0.02, 1);
   return true;
 }
 var drainCarry = 0;   // same idea for the drain side
@@ -909,13 +937,14 @@ function applyWeather() {
       px[idx] = px[nP]; py[idx] = py[nP];
       pvx[idx] = pvx[nP]; pvy[idx] = pvy[nP];
       pTag[idx] = pTag[nP];
+      pMass[idx] = pMass[nP];
     }
     removed++;
   }
 }
 
 // ---- Render ----
-var occ = null, fillAlpha = null;
+var occ = null, fillAlpha = null, dropCell = null;
 
 // ---- Glow sprite ----
 // Everything on screen is one colour at one brightness, so the whole per-cell
@@ -1009,9 +1038,21 @@ function render() {
   }
 
   // count particles per sim cell — one cell, one block
+  // Two counts: total particles per cell, and whether an airborne drop is in
+  // it. A drop is a single particle, so any threshold above 1 would erase the
+  // rain entirely on its way down unless it's exempt.
+  var showRain = CONFIG.rainAlwaysVisible;
+  if (showRain) {
+    if (!dropCell || dropCell.length !== numCells) dropCell = new Uint8Array(numCells);
+    else dropCell.fill(0);
+  }
+
   for (var p = 0; p < nP; p++) {
     var ci = px[p] | 0, cj = py[p] | 0;
-    if (ci >= 0 && ci < simW && cj >= 0 && cj < simH) occ[ci + cj * simW]++;
+    if (ci < 0 || ci >= simW || cj < 0 || cj >= simH) continue;
+    var ix = ci + cj * simW;
+    occ[ix]++;
+    if (showRain && pTag[p] === 1) dropCell[ix] = 1;
   }
 
   // Fill is binary by default: any cell holding water gets the full colour, so
@@ -1021,10 +1062,13 @@ function render() {
   var full = rest * 0.7;
   var fade = appearance.surfaceFade || 0;
 
+  var minP = Math.max(1, CONFIG.minParticles | 0);
+
   var i, j, idx;
   for (i = 0; i < numCells; i++) {
     var k = occ[i];
-    if (k <= 0) { fillAlpha[i] = 0; continue; }
+    var visible = k >= minP || (showRain && dropCell[i] === 1);
+    if (!visible) { fillAlpha[i] = 0; continue; }
     fillAlpha[i] = fade > 0
       ? (1 - fade) + fade * Math.min(1, k / full)
       : 1;
@@ -1036,12 +1080,12 @@ function render() {
   for (j = 1; j < simH - 1; j++) {
     for (i = 1; i < simW - 1; i++) {
       idx = i + j * simW;
-      if (occ[idx] > 0) continue;
+      if (fillAlpha[idx] > 0) continue;
       var n = 0, sum = 0;
-      if (occ[idx - 1] > 0)    { n++; sum += fillAlpha[idx - 1]; }
-      if (occ[idx + 1] > 0)    { n++; sum += fillAlpha[idx + 1]; }
-      if (occ[idx - simW] > 0) { n++; sum += fillAlpha[idx - simW]; }
-      if (occ[idx + simW] > 0) { n++; sum += fillAlpha[idx + simW]; }
+      if (fillAlpha[idx - 1] > 0)    { n++; sum += fillAlpha[idx - 1]; }
+      if (fillAlpha[idx + 1] > 0)    { n++; sum += fillAlpha[idx + 1]; }
+      if (fillAlpha[idx - simW] > 0) { n++; sum += fillAlpha[idx - simW]; }
+      if (fillAlpha[idx + simW] > 0) { n++; sum += fillAlpha[idx + simW]; }
       if (n >= 3) fillAlpha[idx] = sum / n;
     }
   }
@@ -1071,8 +1115,6 @@ function stats() {
     fps: +(1 / frameAvg).toFixed(1),
     msAvg: +(frameAvg * 1000).toFixed(2),
     msWorst: +(frameWorstShown * 1000).toFixed(2),
-    quality: +quality.toFixed(2),
-    atFloor: quality <= CONFIG.minQuality + 1e-6,
     simMs: +(simMs).toFixed(2),
     renderMs: +(renderMs).toFixed(2),
     otherMs: +Math.max(0, frameAvg * 1000 - simMs - renderMs).toFixed(2),
@@ -1094,8 +1136,7 @@ function drawStats() {
   var lines = [
     st.fps + ' fps   ' + st.msAvg + ' ms (peak ' + st.msWorst + ')',
     'sim ' + st.simMs + '   render ' + st.renderMs + '   idle ' + st.otherMs,
-    'quality ' + st.quality.toFixed(2) + (st.atFloor ? ' (floor)' : '') +
-      '   iters ' + st.pressureIters + '/' + st.particleIters,
+    'iters ' + st.pressureIters + '/' + st.particleIters + '   ppc ' + CONFIG.particlesPerCell,
     st.grid + ' = ' + st.cells + ' cells   dpr ' + st.dpr,
     st.particles + ' particles   ' + st.drops + ' drops',
     'sprite ' + st.sprite + 'px   span ' + st.span + ' cells'
@@ -1115,68 +1156,33 @@ function drawStats() {
   ctx.fillRect(6, top, wMax + pad * 2, lines.length * lh + pad * 2);
 
   // green while comfortably above target, amber when the governor is cutting back
-  ctx.fillStyle = st.fps >= CONFIG.targetFps ? 'rgba(140,220,235,0.95)'
-                : st.quality > CONFIG.minQuality ? 'rgba(230,190,120,0.95)'
+  ctx.fillStyle = st.fps >= 50 ? 'rgba(140,220,235,0.95)'
+                : st.fps >= 30 ? 'rgba(230,190,120,0.95)'
                 : 'rgba(235,140,140,0.95)';
   for (var j = 0; j < lines.length; j++)
     ctx.fillText(lines[j], 6 + pad, top + pad + j * lh);
   ctx.restore();
 }
 
-// ---- Frame pacing & automatic quality ----
-// Two separate jobs. Pacing keeps the water moving at the right speed even at
-// 30fps — with a fixed dt a slow phone plays everything in slow motion. The
-// governor then buys frame time back by spending less on the parts that show
-// the least: solver iterations first, then the second glow layer.
+// ---- Frame pacing ----
+// Physics time follows the real clock. With a fixed dt a slow phone plays
+// everything in slow motion; this keeps the water moving at the right speed
+// and just shows fewer frames of it.
 
 var lastTs = 0;
 var frameAvg = 1 / 60;
 var simMs = 0, renderMs = 0;   // smoothed split of where the frame actually goes
-var frameWorst = 0;      // slowest frame in the current second
+var frameWorst = 0;            // slowest frame in the current second
 var frameWorstShown = 0;
 var statsClock = 0;
-var quality = 1;
-var qualityCooldown = 0;
 
-function applyQuality() {
-  var q = quality;
-  numPressureIters = Math.max(8, Math.round(CONFIG.pressureIters * q));
-  numParticleIters = Math.max(1, Math.round(CONFIG.particleIters * q));
-
-  // This path is fill-rate bound, not call bound: each stamp covers
-  // bloomSpread^2 cells' worth of pixels. Shrinking the ambient reach is the
-  // only render lever that actually buys frame time here.
-  var span = q < 0.7 ? CONFIG.bloomSpread * 0.55
-           : q < 0.9 ? CONFIG.bloomSpread * 0.8
-           : CONFIG.bloomSpread;
-  span = Math.max(CONFIG.haloSpread, span);
-  if (span !== appearance.bloomSpread) {
-    appearance.bloomSpread = span;
-    if (cellW) buildComboSprite();
-  }
-}
-
-function governQuality(frameSec) {
+function trackFrame(frameSec) {
   frameAvg += (frameSec - frameAvg) * 0.05;      // slow EMA, ignores single spikes
 
   // track the worst frame per second separately — an average hides hitches
   if (frameSec > frameWorst) frameWorst = frameSec;
   statsClock += frameSec;
   if (statsClock >= 1) { frameWorstShown = frameWorst; frameWorst = 0; statsClock = 0; }
-
-  if (!CONFIG.autoQuality) return;
-  if (qualityCooldown > 0) { qualityCooldown--; return; }
-
-  var fps = 1 / frameAvg;
-  var before = quality;
-
-  if (fps < CONFIG.targetFps * 0.95) quality = Math.max(CONFIG.minQuality, quality - 0.15);
-  else if (fps > CONFIG.targetFps * 1.15 && quality < 1) quality = Math.min(1, quality + 0.05);
-
-  if (quality !== before) {
-    applyQuality();
-    qualityCooldown = 45;                        // let it settle before judging again
-  }
 }
 
 function loop(ts) {
@@ -1188,7 +1194,7 @@ function loop(ts) {
   // A backgrounded tab returns a huge delta, which the upper clamp absorbs.
   dt = clamp(frameSec, 1 / 240, 1 / 30);
 
-  governQuality(frameSec);
+  trackFrame(frameSec);
 
   // split the frame so it's obvious which half to attack. 'idle' is whatever
   // the browser spends outside our code — compositing, vsync wait, GC.
@@ -1205,7 +1211,6 @@ function loop(ts) {
 }
 
 resize();
-applyQuality();
 var rt;
 window.addEventListener('resize', function () {
   clearTimeout(rt);
