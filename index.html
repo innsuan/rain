@@ -24,99 +24,113 @@
 
 var CONFIG = {
 
-  // ---- 像素格 · grid ----
-  block: 4,          // 方块边长（CSS 像素）  block size in px
-  gap: 8,            // 方块之间的缝隙        gap between blocks in px
-  maxCells: 1410,    // 格子数上限，卡顿就调小 lower this if the phone stutters
+  // ============================================================
+  //  固定参数 — 不会被指令改动，只能在这里手改
+  //  🔴 标记的是「初始值」，实际运行时读的是下面 LIVE 里的同名字段，
+  //     可以被 window.liveConfig.set() 实时覆盖
+  // ============================================================
 
-  // ---- 颜色 · colour ----
-  r: 91, g: 163, b: 181,   // 水色，默认 #5ba3b5
+  // ---- 图像 · visual ----
+  block: 4,          // 方块边长（CSS 像素）
+  gap: 8,            // 方块之间的缝隙
+  maxCells: 2115,    // 格子数上限，卡顿就调小
+  r: 91, g: 163, b: 181,   // 🔴 水色默认值，默认 #5ba3b5。实时改水色用 LIVE.r/g/b
   bg: '#0a0e17',           // 背景色
   surfaceFade: 0,          // 0 = 颜色完全均匀；0.3-0.5 = 水面边缘柔化
-  minParticles: 2,         // 一格里至少几颗粒子才画方块。门槛是相对静止密度的：
-                           //   particlesPerCell 是 9 时，门槛 5-6 才相当于
-                           //   密度 3 时的门槛 2。调高会剃掉表层、轮廓更硬，
-                           //   水位看起来也会低一点
-  rainAlwaysVisible: true, // true = 空中的雨滴不受 minParticles 限制。
-                           //   一滴雨只有一颗粒子，否则门槛一上调就整个消失
+  minParticles: 1,         // 一格里至少几颗粒子才画方块
+  rainAlwaysVisible: true, // true = 空中的雨滴不受 minParticles 限制
+  showStats: false,        // true = 左上角显示帧率读数，也可用 ?fps=1
 
-  // ---- 光晕 · glow ----
-  // 方块和它的光晕一起烘焙进一张精灵，每格盖一次。贴身层和弥散层的衰减曲线
-  // 按 haloMix 合成为同一条，所以两者共用一张图，不需要离屏合成。
+  // 光晕：方块和它的光晕一起烘焙进一张精灵，每格盖一次
   glow: 0.99,        // 光晕峰值亮度，占方块颜色的比例。必须 <= 1
-                     //   0.9 以上时紧贴方块的一圈几乎与方块等亮
-  glowBoost: 1.0,    // 整体提亮系数。相邻光晕用覆盖而非加法叠加，重叠处偏暗，
-                     //   1.15-1.3 可以补回来
-  haloMix: 0.8,      // 贴身光晕 vs 大范围辉光的配比。1 = 只要贴身的
-  haloSpread: 1.2,   // 贴身光晕的直径，单位是「格」。1 = 刚好一格宽
-  bloomSpread: 3.0,  // 弥散辉光的直径，单位是「格」。
-                     //   ⚠ 精灵面积随它平方增长，是这个版本最大的开销来源：
-                     //   1.5 -> 全屏 1.1 倍填充，3.0 -> 4.5 倍，4.0 -> 8 倍
-  core: 0.2,         // 中心平台：半径的这个比例内保持满亮度，之后才开始衰减。
-                     //   要让紧贴方块的一圈与方块同亮，core 需 >= (block/pitch)/haloSpread
-  falloff: 2.75,     // 平台之外的衰减曲线。1 = 线性偏亮，3 = 尾巴长而淡
+  glowBoost: 1.0,    // 整体提亮系数
+  haloMix: 0.8,      // 贴身光晕 vs 大范围辉光的配比
+  haloSpread: 1.2,   // 贴身光晕的直径，单位是「格」
+  bloomSpread: 3.0,  // 弥散辉光的直径，单位是「格」。面积随它平方增长
+  core: 0.2,         // 中心平台：半径的这个比例内保持满亮度
+  falloff: 2.75,     // 平台之外的衰减曲线
 
-  // ---- 水量 · water ----
-  // 雨量和水位是分开的：雨永远按 rainRate 下，水位靠排水自动调节，
-  // 多了就多排、少了就少排，所以调 rainRate 只改雨的密度，不改水面高度。
-  rainRate: 0.1,     // 每帧从顶部落下的雨滴数，可以是小数。
-                     //   0.2 = 每 5 帧一颗（约每秒 12 颗），1 稀疏，4 中等，8 密集
-  rainRateMax: 1,    // rainRate 的硬上限，写再大也不会超过
-  rainMaxDrops: 700, // 空中同时存在的雨滴上限。满了就暂停生成，
-                     //   这是防止「雨落得比排水快、水位涨到屏顶」的主要闸门
-  waterLevel: 0.75,  // 水面高度，0 = 顶部，1 = 底部。初始水量和目标水量都由它决定
-  drainSpeed: 0.05,  // 水位回到目标值的快慢。太大水面会一跳一跳
-  drainBand: 3,      // 底部多少格内的水可以被排走。太窄会限制最大排水量
-  maxParticles: 12000,
-                     // 粒子总数上限。particlesPerCell 调大时要一起提，否则
-                     //   播种会提前截断，静止密度达不到设定值
-  particlesPerCell: 9,
-                     // 一格水体由多少颗粒子构成。它和 rainMass 共同决定
-                     //   「一滴雨相对于一格水有多大」：当前是 0.35/9，约 1/26。
-                     //   代价是粒子总数按 N 线性增长（约 1.1ms / 千颗）。
-
-  // ---- 潮汐 · tide ----
-  // 垂直于重力方向的正弦加速度。重力朝下时是左右摇，手机侧过来时会自动
-  // 变成沿着新的水面方向摇。用的是力而不是直接位移，所以水会真的爬坡、
-  // 回落、拍打边缘，而不是整块平移。
-  tideAmplitude: 3,  // 摇晃力度，和 gravity 同单位。0 = 关闭。
-                     //   gravity 的 20% 左右是很明显的晃动
-  tidePeriod: 12.0,  // 一个完整来回的秒数。越小越急促。
-                     //   注意水池本身有固有周期（当前设置下约 4-5 秒），设在附近
-                     //   会共振、摆幅放大数倍；想要克制的晃动就避开它
-  tideRainImmune: true,  // true = 下落中的雨滴不受潮汐影响
-
-  // ---- 交互 · interaction ----
-  // 重力只由陀螺仪决定。拖拽不改变重力，只在手指划过的瞬间推动水体。
-  dragStrength: 50,  // 拖拽推水的力度
-  dragRadius: 50,    // 拖拽影响的半径，单位是「格」。比屏幕还大就是整片水一起推
-  dragMaxSpeed: 40,  // 单次拖拽能给出的最大速度，防止甩太狠
-  rainImmune: true,  // true = 正在下落的雨滴不受拖拽影响
-  rainDiscrete: true,// true = 下落中的雨滴各自独立：不互推、不进网格、不参与压力，
-                     //   所以是一颗一颗分开的方块，落进水体的瞬间才并入流体
-  rainSpread: 4,     // 生成时沿上游方向铺开几格，避免一帧的雨排成一条线
-  rainTerminal: 0,   // 雨滴的终端速度（格/秒），相当于空气阻力。0 = 不限速
-  rainImpact: 1,     // 落水瞬间保留多少动量。1 = 全部注入
-  rainMass: 0.35,    // 一滴雨的质量，水体粒子恒为 1。质量参与密度统计和网格
-                     //   传递，所以轻的雨滴只造成小超压、只注入少量动量。
-                     //   渲染不受影响，仍然是一个满色方块
-  rainMergeTime: 0.4,// 落水后质量长到 1 所需的秒数。设 0 会瞬间跳变，等于凭空
-                     //   多出体积，反而形成新的冲击
-
-  // ---- 性能 · performance ----
-  // 物理时间跟着真实时间走，所以帧率低时水不会变成慢动作，只是画面不流畅。
-  // 想省性能就直接调 maxCells / particlesPerCell / bloomSpread / pressureIters。
-  showStats: false,  // true = 左上角显示帧率读数。也可以在网址后面加 ?fps=1 临时打开
-
-  // ---- 手感 · feel ----
-  gravity: 30,       // 重力大小。手机竖直时的满值；越平躺越接近 0
-  gravityFloor: 0.2, // 手机接近水平时保留的最小重力，占 gravity 的比例。
-                     //   0 = 完全失重（水会飘着不动）
-  flipRatio: 0.95,   // 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
-  pressureIters: 20, // 越高水越不可压缩，越贵
+  // ---- 水体 · water body ----
+  waterLevel: 0.25,  // 🔴 水面高度，0 = 底部（空），1 = 顶部（满）
+  drainSpeed: 0.05,  // 🔴 水位回到目标值的快慢
+  drainBand: 3,      // 底部多少格内的水可以被排走
+  maxParticles: 12000,     // 粒子总数上限
+  particlesPerCell: 9,     // 一格水体由多少颗粒子构成
+  flipRatio: 0.975,   // 🔴 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
+  pressureIters: 20, // 压力迭代次数，越高水越不可压缩，越贵
   particleIters: 2,  // 粒子互推的迭代次数
   driftK: 1.0,       // 密度补偿强度，防止结块和空洞
+
+  // ---- 潮汐 · tide ----
+  // 周期性地旋转重力方向本身（而不是叠加一个额外的侧向力），所以合力大小
+  // 永远不变，只有朝向在摆；重力朝下时表现为左右摇，手机侧过来会自动变成
+  // 沿着新的水面方向摇
+  tideAmplitude: 0.1,  // 🔴 摇摆的最大旋转角度，单位是弧度（不是力的比例）。
+                       //   0 = 关闭，0.05-0.3 是明显但不失控的晃动，数值就是
+                       //   sin() 摆动的角度振幅，直接决定重力被转开多少
+  tidePeriod: 12.0,  // 🔴 一个完整来回的秒数
+  tideRainImmune: true,  // true = 下落中的雨滴不受潮汐影响
+
+  // ---- 雨 · rain ----
+  // 雨量和水位分开：雨永远按 rainRate 下，水位靠排水自动调节
+  rainRate: 0.1,     // 🔴 每帧从顶部落下的雨滴数，可以是小数
+  rainRateMax: 2,    // rainRate 的硬上限
+  rainMaxDrops: 700, // 空中同时存在的雨滴上限
+  rainDiscrete: true,// true = 下落中的雨滴各自独立，不互推、不进网格、不参与压力
+  rainImmune: true,  // true = 正在下落的雨滴不受拖拽影响
+  rainTerminal: 0,   // 雨滴的终端速度（格/秒），相当于空气阻力。0 = 不限速
+  rainImpact: 1,     // 落水瞬间保留多少动量。1 = 全部注入
+  rainInitialSpeed: 50, // 🔴 沿重力方向的额外初速度。0 = 不加
+
+  // ---- 风 · wind ----
+  // 风力做一次缓慢的随机游走，风向恒定平行于陀螺仪测定的重力切线方向（不受
+  // 潮汐旋转影响）。雨滴只在生成那一刻采样一次风，之后飞行途中不再受风影响；
+  // 落定的水体每帧持续受风推动。
+  windMin: 1.0,          // 🔴 风力随机游走的下限
+  windMax: 6.0,          // 🔴 风力随机游走的上限
+  windChangeSpeed: 0.5,  // 🔴 风力追向新目标的速度，越小越平滑
+
+  // ---- 交互 · interaction ----
+  dragStrength: 50,  // 拖拽推水的力度
+  dragRadius: 50,    // 拖拽影响的半径，单位是「格」
+  dragMaxSpeed: 50,  // 单次拖拽能给出的最大速度
+  gravity: 75,       // 重力大小，手机竖直时的满值
+  gravityFloor: 0.2, // 手机接近水平时保留的最小重力，占 gravity 的比例
 };
+
+// ============================================================
+//  LIVE — 可被指令实时改动的子集
+//  只有这里列出的字段能通过 window.liveConfig.set() 改；其余一律只读
+// ============================================================
+
+var LIVE_RANGES = {
+  r: [0, 255], g: [0, 255], b: [0, 255],
+  rainRate: [0, 1e6],
+  waterLevel: [0.03, 0.97],
+  drainSpeed: [0, 2],
+  tideAmplitude: [0, 2],   // 弧度，最多约 115°，防止摇摆角度失控
+  tidePeriod: [0.5, 120],
+  rainInitialSpeed: [0, 400],
+  flipRatio: [0, 0.99],
+  windMin: [0, 1e6],
+  windMax: [0, 1e6],
+  windChangeSpeed: [0.02, 10],
+};
+
+var LIVE = {
+  r: CONFIG.r, g: CONFIG.g, b: CONFIG.b,
+  rainRate: CONFIG.rainRate,
+  waterLevel: CONFIG.waterLevel,
+  drainSpeed: CONFIG.drainSpeed,
+  tideAmplitude: CONFIG.tideAmplitude,
+  tidePeriod: CONFIG.tidePeriod,
+  rainInitialSpeed: CONFIG.rainInitialSpeed,
+  flipRatio: CONFIG.flipRatio,
+  windMin: CONFIG.windMin,
+  windMax: CONFIG.windMax,
+  windChangeSpeed: CONFIG.windChangeSpeed,
+};
+
 
 
 
@@ -153,7 +167,6 @@ var dt = 1 / 60;            // rewritten every frame from the real clock
 var numPressureIters = CONFIG.pressureIters;
 var numParticleIters = CONFIG.particleIters;
 var overRelax = 1.9;
-var flipRatio = CONFIG.flipRatio;
 var compensateDrift = true;
 var driftK = CONFIG.driftK;
 
@@ -166,11 +179,6 @@ var pvx = new Float32Array(maxP);
 var pvy = new Float32Array(maxP);
 // 0 = part of the body, 1 = still falling as rain (exempt from drag)
 var pTag = new Uint8Array(maxP);
-// Per-particle mass. Body particles are 1; a drop in flight carries rainMass
-// and ramps up to 1 once it merges. Mass weights both the density count and
-// the particle->grid transfer, which is what makes a light drop a small
-// perturbation instead of a full cell's worth of water appearing at once.
-var pMass = new Float32Array(maxP);
 
 // particle radius is now tied to the seeding spacing (lib.rs: r = 0.3*h, dx = 2r)
 // Particle radius sets how many fit in a cell: packing density goes as 1/r^2,
@@ -262,7 +270,7 @@ function seed() {
   var dy = Math.sqrt(3.0) / 2.0 * dx;
   var minX = 1.0 + pRadius, maxX = (simW - 1) - pRadius;
   var minY = 1.0 + pRadius, maxY = (simH - 1) - pRadius;
-  var startY = minY + (maxY - minY) * CONFIG.waterLevel;
+  var startY = minY + (maxY - minY) * (1 - LIVE.waterLevel);
 
   var row = 0;
   for (var y = startY; y <= maxY; y += dy, row++) {
@@ -271,7 +279,6 @@ function seed() {
       px[nP] = x; py[nP] = y;
       pvx[nP] = 0; pvy[nP] = 0;
       pTag[nP] = 0;
-      pMass[nP] = 1;
       nP++;
     }
   }
@@ -279,54 +286,121 @@ function seed() {
   targetP = nP;
 }
 
+// Mirrors seed()'s lattice math to count how many particles a given water
+// level WOULD hold, without spawning anything. Lets the drain controller
+// glide the pool to a new live waterLevel instead of a jarring reseed.
+function computeTargetParticles(level) {
+  var dx = 2.0 * pRadius;
+  var dy = Math.sqrt(3.0) / 2.0 * dx;
+  var minX = 1.0 + pRadius, maxX = (simW - 1) - pRadius;
+  var minY = 1.0 + pRadius, maxY = (simH - 1) - pRadius;
+  var startY = minY + (maxY - minY) * (1 - clamp(level, 0, 1));
+
+  var count = 0, row = 0;
+  for (var y = startY; y <= maxY; y += dy, row++) {
+    for (var x = minX + (row % 2 ? pRadius : 0); x <= maxX; x += dx) count++;
+  }
+  return count;
+}
+
 var gx = 0, gy = CONFIG.gravity;
 
 // ---- 1. integrate ----
 var simTime = 0;
-var tideX = 0, tideY = 0;
+var tideAngle = 0;   // current tide rotation, in radians
 
-// Sinusoidal acceleration at right angles to gravity, so the sway always runs
-// along the water's surface no matter how the phone is held.
+// "垂直于重力的方向" 这个量潮汐、风、雨的生成都要用，同一份公式原来分别在
+// 三个函数里各写了一遍。现在每帧只算一次，存进 gravTanX/Y 共用。
+// "perpendicular to gravity" is needed by tide, wind, and rain spawn — this
+// used to be computed independently, with the identical formula, in three
+// different functions. Now it's computed once per frame and shared.
+var gravTanX = 1, gravTanY = 0;    // unit vector, tangent to gravity
+var gravDownX = 0, gravDownY = 1;  // unit vector, along gravity ("down")
+
+function updateGravityBasis() {
+  var gLen = Math.sqrt(gx * gx + gy * gy);
+  if (gLen < 1e-4) {
+    gravTanX = 1; gravTanY = 0;
+    gravDownX = 0; gravDownY = 1;
+    return;
+  }
+  gravDownX = gx / gLen;
+  gravDownY = gy / gLen;
+  gravTanX = -gravDownY;
+  gravTanY = gravDownX;
+}
+
+// Periodically rotates gravity's direction back and forth by a small angle,
+// instead of adding a separate sideways force. tideAmplitude is now read as
+// radians of sway (0.1-0.3 is a visible but not disorienting rock).
 function updateTide(sdt) {
   simTime += sdt;
-  var amp = CONFIG.tideAmplitude;
-  if (amp <= 0 || CONFIG.tidePeriod <= 0) { tideX = tideY = 0; return; }
+  var amp = LIVE.tideAmplitude;
+  if (amp <= 0 || LIVE.tidePeriod <= 0) { tideAngle = 0; return; }
 
-  var gLen = Math.sqrt(gx * gx + gy * gy);
-  var ux, uy;
-  if (gLen < 1e-4) { ux = 1; uy = 0; }        // no gravity: fall back to horizontal
-  else { ux = -gy / gLen; uy = gx / gLen; }   // rotate gravity 90 degrees
+  tideAngle = Math.sin(simTime * 2 * Math.PI / LIVE.tidePeriod) * amp;
+}
 
-  var a = Math.sin(simTime * 2 * Math.PI / CONFIG.tidePeriod) * amp;
-  tideX = ux * a;
-  tideY = uy * a;
+// ---- Wind ----
+// A slow random walk on force. Direction is always exactly the gyro-measured
+// gravity's tangent (perpendicular to gx,gy) — no independent angle wander,
+// and unaffected by the tide rotation applied to particles below. Read once
+// per frame by integrateParticles: falling drops freeze whatever vector was
+// current at spawn (so a gust doesn't reach back and bend a drop already in
+// flight — see spawnRainDrop), landed water gets pushed by the live value
+// every frame.
+var currentWindForce = (CONFIG.windMin + CONFIG.windMax) * 0.5;
+var targetWindForce = currentWindForce;
+var currentWindDirX = 1, currentWindDirY = 0;
+
+function updateWind(sdt) {
+  // occasionally roll a new target force, chase it smoothly the rest of the time
+  if (Math.random() < 0.02) {
+    targetWindForce = LIVE.windMin + Math.random() * (LIVE.windMax - LIVE.windMin);
+  }
+  currentWindForce += (targetWindForce - currentWindForce) *
+    clamp(sdt * LIVE.windChangeSpeed * 2, 0, 1);
+
+  currentWindDirX = gravTanX;
+  currentWindDirY = gravTanY;
 }
 
 function integrateParticles(sdt) {
   var rainSkipsTide = CONFIG.tideRainImmune;
   var term = CONFIG.rainTerminal, term2 = term * term;
 
-  var mergeStep = CONFIG.rainMergeTime > 0
-    ? sdt / CONFIG.rainMergeTime : 1;
+  updateWind(sdt);
 
+  var tideCa = Math.cos(tideAngle), tideSa = Math.sin(tideAngle);
+
+  // 全局唯一的一个遍历粒子的 for 循环
   for (var i = 0; i < nP; i++) {
     var isRain = pTag[i] === 1;
 
-    // a landed drop grows into full volume over rainMergeTime rather than
-    // popping to mass 1 the instant it touches the surface
-    if (!isRain && pMass[i] < 1) {
-      pMass[i] += mergeStep;
-      if (pMass[i] > 1) pMass[i] = 1;
+    var ax = gx, ay = gy;
+    if (!(rainSkipsTide && isRain) && tideAngle !== 0) {
+      // rotate gravity itself by the tide angle, rather than adding a
+      // separate sideways acceleration — magnitude never changes
+      ax = gx * tideCa - gy * tideSa;
+      ay = gx * tideSa + gy * tideCa;
     }
 
-    var ax = gx, ay = gy;
-    if (!(rainSkipsTide && isRain)) { ax += tideX; ay += tideY; }
+    // 表面风力：只吹已经落定、且不在池底保护带内的水体粒子，避免把池底撕开
+    if (!isRain) {
+      var ci = clamp(Math.floor(px[i]), 0, simW - 1);
+      var cj = clamp(Math.floor(py[i]), 0, simH - 1);
+      var cellAbove = ci + (cj - 1) * simW;
+
+      if (cj > 0 && cj < simH - 4 && cellType[cellAbove] === AIR) {
+         ax += currentWindDirX * currentWindForce * 5.0;
+         ay += currentWindDirY * currentWindForce * 5.0;
+      }
+    }
+
     pvx[i] += sdt * ax;
     pvy[i] += sdt * ay;
 
-    // Drops are ballistic, so nothing else limits how fast they arrive. Left
-    // unchecked they hit the surface carrying far more momentum than the body
-    // has, which is what makes the splash look oversized.
+    // Drops are ballistic, so nothing else limits how fast they arrive.
     if (isRain && term > 0) {
       var sp2 = pvx[i] * pvx[i] + pvy[i] * pvy[i];
       if (sp2 > term2) {
@@ -436,9 +510,8 @@ function transferToGrid() {
     var x = px[p], y = py[p] - 0.5;
     var i0 = clamp(Math.floor(x), 0, simW - 2), j0 = clamp(Math.floor(y), 0, simH - 2);
     var fx = clamp(x - i0, 0, 1), fy = clamp(y - j0, 0, 1);
-    var m = pMass[p];
-    var w00 = (1 - fx) * (1 - fy) * m, w10 = fx * (1 - fy) * m,
-        w01 = (1 - fx) * fy * m, w11 = fx * fy * m;
+    var w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy),
+        w01 = (1 - fx) * fy, w11 = fx * fy;
     var a = i0 + j0 * simW, b = a + 1, c = a + simW, d = c + 1;
     u[a] += w00 * pvx[p]; wU[a] += w00;
     u[b] += w10 * pvx[p]; wU[b] += w10;
@@ -449,8 +522,8 @@ function transferToGrid() {
     x = px[p] - 0.5; y = py[p];
     i0 = clamp(Math.floor(x), 0, simW - 2); j0 = clamp(Math.floor(y), 0, simH - 2);
     fx = clamp(x - i0, 0, 1); fy = clamp(y - j0, 0, 1);
-    w00 = (1 - fx) * (1 - fy) * m; w10 = fx * (1 - fy) * m;
-    w01 = (1 - fx) * fy * m; w11 = fx * fy * m;
+    w00 = (1 - fx) * (1 - fy); w10 = fx * (1 - fy);
+    w01 = (1 - fx) * fy; w11 = fx * fy;
     a = i0 + j0 * simW; b = a + 1; c = a + simW; d = c + 1;
     v[a] += w00 * pvy[p]; wV[a] += w00;
     v[b] += w10 * pvy[p]; wV[b] += w10;
@@ -493,12 +566,10 @@ function updateParticleDensity() {
     var ty = ((y - h2) - y0 * h) / h;
     var y1 = Math.min(y0 + 1, simH - 2);
 
-    var m = pMass[p];
-    var sx = (1.0 - tx) * m, sy = 1.0 - ty;
-    var txm = tx * m;
+    var sx = 1.0 - tx, sy = 1.0 - ty;
     if (x0 < simW && y0 < simH) particleDensity[x0 + y0 * simW] += sx * sy;
-    if (x1 < simW && y0 < simH) particleDensity[x1 + y0 * simW] += txm * sy;
-    if (x1 < simW && y1 < simH) particleDensity[x1 + y1 * simW] += txm * ty;
+    if (x1 < simW && y0 < simH) particleDensity[x1 + y0 * simW] += tx * sy;
+    if (x1 < simW && y1 < simH) particleDensity[x1 + y1 * simW] += tx * ty;
     if (x0 < simW && y1 < simH) particleDensity[x0 + y1 * simW] += sx * ty;
   }
 
@@ -624,7 +695,7 @@ function transferToParticles() {
 
     var picU  = w00 * u[a]     + w10 * u[b]     + w01 * u[c]     + w11 * u[d];
     var oldU  = w00 * prevU[a] + w10 * prevU[b] + w01 * prevU[c] + w11 * prevU[d];
-    pvx[p] = flipRatio * (pvx[p] + (picU - oldU)) + (1 - flipRatio) * picU;
+    pvx[p] = LIVE.flipRatio * (pvx[p] + (picU - oldU)) + (1 - LIVE.flipRatio) * picU;
 
     x = px[p] - 0.5; y = py[p];
     i0 = clamp(Math.floor(x), 0, simW - 2); j0 = clamp(Math.floor(y), 0, simH - 2);
@@ -634,7 +705,7 @@ function transferToParticles() {
 
     var picV  = w00 * v[a]     + w10 * v[b]     + w01 * v[c]     + w11 * v[d];
     var oldV  = w00 * prevV[a] + w10 * prevV[b] + w01 * prevV[c] + w11 * prevV[d];
-    pvy[p] = flipRatio * (pvy[p] + (picV - oldV)) + (1 - flipRatio) * picV;
+    pvy[p] = LIVE.flipRatio * (pvy[p] + (picV - oldV)) + (1 - LIVE.flipRatio) * picV;
 
     var sp2 = pvx[p] * pvx[p] + pvy[p] * pvy[p];
     if (sp2 > maxSp2) {
@@ -665,7 +736,7 @@ function simulate() {
 // orientation angle — skipping that second step is what made gravity point
 // along a diagonal once the phone was turned sideways.
 
-var gyroActive = false, gyroLive = false;
+var gyroActive = false;
 
 function screenAngle() {
   if (screen && screen.orientation && typeof screen.orientation.angle === 'number')
@@ -675,7 +746,6 @@ function screenAngle() {
 
 function handleOri(e) {
   if (e.beta === null && e.gamma === null) return;
-  gyroLive = true;
 
   var beta = (e.beta || 0) * Math.PI / 180;    // front-back tilt
   var gamma = (e.gamma || 0) * Math.PI / 180;  // left-right tilt
@@ -724,10 +794,9 @@ function activateGyro() {
   }
 }
 
-// re-evaluate on rotation so the axis snaps immediately, not on the next tilt
-window.addEventListener('orientationchange', function () {
-  if (screen && screen.orientation) return;   // modern path updates on its own
-});
+// screenAngle() already reads screen.orientation.angle live on every gyro
+// event, so no separate rotation listener is needed — handleOri() self-
+// corrects on the very next reading.
 
 // ---- Touch/mouse → momentary impulse on the water ----
 // Gravity belongs to the gyroscope alone. A drag no longer tilts the world; it
@@ -792,13 +861,9 @@ canvas.addEventListener('mousemove', function (e) { pointerMove(e.clientX, e.cli
 canvas.addEventListener('mouseup', pointerEnd);
 canvas.addEventListener('mouseleave', pointerEnd);
 
-// ---- Weather & appearance (controllable) ----
-var weather = {
-  rainRate: CONFIG.rainRate,
-};
-
+// ---- Weather & appearance ----
 var appearance = {
-  r: CONFIG.r, g: CONFIG.g, b: CONFIG.b,
+  r: LIVE.r, g: LIVE.g, b: LIVE.b,
   surfaceFade: CONFIG.surfaceFade,
   glow: CONFIG.glow,
   haloMix: CONFIG.haloMix,
@@ -820,11 +885,8 @@ var rainCarry = 0;    // fractional leftover, so rainRate can be 0.2
 function spawnRainDrop(slot) {
   var lo = 1.2, hiX = simW - 1.2, hiY = simH - 1.2;
 
-  var gLen = Math.sqrt(gx * gx + gy * gy);
-  var ux, uy;
-  if (gLen < 1e-4) { ux = 0; uy = 1; }
-  else { ux = gx / gLen; uy = gy / gLen; }     // unit "down"
-  var qx = -uy, qy = ux;                       // unit "along the surface"
+  var ux = gravDownX, uy = gravDownY;          // unit "down" (shared)
+  var qx = gravTanX, qy = gravTanY;            // unit "along the surface" (shared)
 
   var cx = (lo + hiX) * 0.5, cy = (lo + hiY) * 0.5;
 
@@ -863,20 +925,19 @@ function spawnRainDrop(slot) {
   }
   if (s1 <= s0) return false;
 
-  // just inside the entry point, spread a few cells deep so a frame's worth of
-  // rain isn't a straight line
-  var depth = Math.min(CONFIG.rainSpread, (s1 - s0) * 0.9);
-  var sp = s0 + 0.4 + Math.random() * depth;
+  // spawn exactly at the entry point on the screen edge
+  var sp = s0 + 0.05;
   if (sp > s1) sp = s1;
 
   px[slot] = clamp(ax + ux * sp, lo, hiX);
   py[slot] = clamp(ay + uy * sp, lo, hiY);
 
-  var speed = 2 + Math.random() * 3;
-  var drift = (Math.random() - 0.5) * 0.5;
-  pvx[slot] = ux * speed + qx * drift;
-  pvy[slot] = uy * speed + qy * drift;
-  pMass[slot] = clamp(CONFIG.rainMass, 0.02, 1);
+  // Wind is sampled at spawn time only: a drop freezes whatever vector was
+  // current the instant it appears, so a later gust doesn't reach back and
+  // curve a drop that's already falling — it just tilts drops spawned after.
+  var speed = 2 + Math.random() * 3 + LIVE.rainInitialSpeed;
+  pvx[slot] = ux * speed + currentWindDirX * currentWindForce;
+  pvy[slot] = uy * speed + currentWindDirY * currentWindForce;
   return true;
 }
 var drainCarry = 0;   // same idea for the drain side
@@ -884,7 +945,7 @@ var drainList = [];
 
 function applyWeather() {
   // --- rain: unconditional, so rainRate actually controls rain density ---
-  var rate = Math.min(weather.rainRate, CONFIG.rainRateMax);
+  var rate = Math.min(LIVE.rainRate, CONFIG.rainRateMax);
 
   // count what is already falling; once the sky is full, hold off
   nRain = 0;
@@ -913,7 +974,7 @@ function applyWeather() {
   // so the overshoot term is what actually pins the water level.
   if (targetP <= 0) return;
   var excess = nP - targetP;
-  drainCarry += rate * (excess > 0 ? 1 : 0) + excess * CONFIG.drainSpeed;
+  drainCarry += rate * (excess > 0 ? 1 : 0) + excess * LIVE.drainSpeed;
   if (drainCarry <= 0) { drainCarry = Math.max(drainCarry, -50); return; }
 
   var toDrain = Math.floor(drainCarry);
@@ -924,8 +985,13 @@ function applyWeather() {
   // the whole array once per removed particle
   drainList.length = 0;
   var floorY = simH - 2.2 - CONFIG.drainBand;
+  // 设定一个边缘保护区，比如左右各留出 5 格的距离不抽水
+  var safeMargin = 5.0;
   for (var k = 0; k < nP; k++) {
-    if (pTag[k] === 0 && py[k] > floorY) drainList.push(k);
+    // 只有在底部，且横向坐标不在边缘保护区内的粒子，才会被抽走
+    if (pTag[k] === 0 && py[k] > floorY && px[k] > safeMargin && px[k] < simW - safeMargin) {
+      drainList.push(k);
+    }
   }
 
   var removed = 0;
@@ -937,7 +1003,6 @@ function applyWeather() {
       px[idx] = px[nP]; py[idx] = py[nP];
       pvx[idx] = pvx[nP]; pvy[idx] = pvy[nP];
       pTag[idx] = pTag[nP];
-      pMass[idx] = pMass[nP];
     }
     removed++;
   }
@@ -1077,25 +1142,43 @@ function render() {
   // Close pinholes: an empty cell surrounded on 3+ sides by water is water.
   // Cheap dilation pass that removes isolated dark specks without thickening
   // the outer edge of the fluid.
+  // 优化：将边界墙壁也视为“天然的水体包围面”，防止角落因为邻居数不足而无法触发补洞
   for (j = 1; j < simH - 1; j++) {
     for (i = 1; i < simW - 1; i++) {
       idx = i + j * simW;
       if (fillAlpha[idx] > 0) continue;
+
       var n = 0, sum = 0;
-      if (fillAlpha[idx - 1] > 0)    { n++; sum += fillAlpha[idx - 1]; }
-      if (fillAlpha[idx + 1] > 0)    { n++; sum += fillAlpha[idx + 1]; }
-      if (fillAlpha[idx - simW] > 0) { n++; sum += fillAlpha[idx - simW]; }
-      if (fillAlpha[idx + simW] > 0) { n++; sum += fillAlpha[idx + simW]; }
+
+      // 左侧：如果是左墙壁 (i === 1)，算作一面墙围着；否则看邻居有没有水
+      if (i === 1 || fillAlpha[idx - 1] > 0) {
+          n++;
+          sum += (i === 1 ? 1 : fillAlpha[idx - 1]);
+      }
+      // 右侧
+      if (i === simW - 2 || fillAlpha[idx + 1] > 0) {
+          n++;
+          sum += (i === simW - 2 ? 1 : fillAlpha[idx + 1]);
+      }
+      // 上侧
+      if (j === 1 || fillAlpha[idx - simW] > 0) {
+          n++;
+          sum += (j === 1 ? 1 : fillAlpha[idx - simW]);
+      }
+      // 下侧：如果是池底 (j === simH - 2)，算作一面墙围着
+      if (j === simH - 2 || fillAlpha[idx + simW] > 0) {
+          n++;
+          sum += (j === simH - 2 ? 1 : fillAlpha[idx + simW]);
+      }
+
+      // 现在角落格子天生自带 2 面“实体墙”，只要旁边的流体有一点水，就能达到 n >= 3 的门槛
       if (n >= 3) fillAlpha[idx] = sum / n;
     }
   }
 
-  var col = 'rgb(' + appearance.r + ',' + appearance.g + ',' + appearance.b + ')';
-
-  // block sits centred in its cell, leaving an even gap on all four sides
-  var offX = (cellW - blockW) * 0.5, offY = (cellH - blockH) * 0.5;
-
   // one stamp per cell draws the block and its halo together
+  // (colour + block/gap offsets are already baked into the sprite by
+  // buildComboSprite(), so nothing needs recomputing here every frame)
   drawGlowFast();
 
   ctx.globalAlpha = 1;
@@ -1139,7 +1222,8 @@ function drawStats() {
     'iters ' + st.pressureIters + '/' + st.particleIters + '   ppc ' + CONFIG.particlesPerCell,
     st.grid + ' = ' + st.cells + ' cells   dpr ' + st.dpr,
     st.particles + ' particles   ' + st.drops + ' drops',
-    'sprite ' + st.sprite + 'px   span ' + st.span + ' cells'
+    'sprite ' + st.sprite + 'px   span ' + st.span + ' cells',
+    'wind ' + currentWindForce.toFixed(2) + '   dir (' + currentWindDirX.toFixed(2) + ',' + currentWindDirY.toFixed(2) + ')'
   ];
 
   ctx.save();
@@ -1195,6 +1279,7 @@ function loop(ts) {
   dt = clamp(frameSec, 1 / 240, 1 / 30);
 
   trackFrame(frameSec);
+  updateGravityBasis();   // gx,gy don't change again until the next gyro event
 
   // split the frame so it's obvious which half to attack. 'idle' is whatever
   // the browser spends outside our code — compositing, vsync wait, GC.
@@ -1209,6 +1294,64 @@ function loop(ts) {
 
   requestAnimationFrame(loop);
 }
+
+// ============================================================
+//  window.liveConfig — AI / 指令改动的唯一入口
+//  只有 LIVE_RANGES 里列出的字段能改，其余一律不接受
+// ============================================================
+
+function applyLiveSideEffects(key) {
+  if (key === 'r' || key === 'g' || key === 'b') {
+    appearance.r = LIVE.r; appearance.g = LIVE.g; appearance.b = LIVE.b;
+    // 颜色是一次性烘焙进精灵图的，改了要重新烤一次才会生效
+    if (cellW) buildComboSprite();
+  }
+  if (key === 'waterLevel') {
+    targetP = Math.min(computeTargetParticles(LIVE.waterLevel), maxWater);
+  }
+}
+
+window.liveConfig = {
+  keys: function () { return Object.keys(LIVE_RANGES); },
+
+  get: function (key) {
+    if (key == null) {
+      var out = {};
+      for (var k in LIVE) out[k] = LIVE[k];
+      return out;
+    }
+    return LIVE[key];
+  },
+
+  set: function (key, value) {
+    var range = LIVE_RANGES[key];
+    if (!range) return { ok: false, error: 'unknown or fixed key: ' + key };
+    var v = clamp(+value, range[0], range[1]);
+    if (!isFinite(v)) return { ok: false, error: 'not a number' };
+
+    if ((key === 'r' || key === 'g' || key === 'b')) v = Math.round(v);
+    if (key === 'windMin' && v > LIVE.windMax) LIVE.windMax = v;
+    if (key === 'windMax' && v < LIVE.windMin) LIVE.windMin = v;
+
+    LIVE[key] = v;
+    applyLiveSideEffects(key);
+    return { ok: true, key: key, value: v };
+  },
+
+  setMany: function (obj) {
+    var results = {};
+    for (var k in obj) results[k] = this.set(k, obj[k]);
+    return results;
+  },
+
+  reset: function (key) {
+    if (key == null) {
+      for (var k in LIVE_RANGES) this.set(k, CONFIG[k]);
+      return this.get();
+    }
+    return this.set(key, CONFIG[key]);
+  }
+};
 
 resize();
 var rt;
