@@ -1391,6 +1391,26 @@ function pollControl() {
 }
 setInterval(pollControl, 5000);
 
+// capture: I remotely POST /capture, the page polls, notices the timestamp
+// changed, and uploads a canvas snapshot — purely reactive, never spontaneous
+var lastCaptureAt = 0;
+function pollCapture() {
+  fetch(RELAY + '/capture?t=' + Date.now())
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (!data || !data.at || data.at === lastCaptureAt) return;
+      lastCaptureAt = data.at;
+      var dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      fetch(RELAY + '/frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataUrl: dataUrl })
+      }).catch(function () {});
+    })
+    .catch(function () {});
+}
+setInterval(pollCapture, 5000);
+
 function sendSnapshot() {
   fetch(RELAY + '/snapshot', {
     method: 'POST',

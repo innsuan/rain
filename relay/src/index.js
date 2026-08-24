@@ -9,11 +9,17 @@
 //   POST /snapshot              -> browser reports a periodic water-state snapshot
 //   GET  /snapshot?since=<ms>   -> read back snapshots newer than `since`
 //   GET  /watch                 -> WebSocket upgrade; every /touch POST is broadcast here
+//   POST /capture               -> request a frame grab (requires X-Auth: CONTROL_SECRET)
+//   GET  /capture               -> current capture request timestamp (page polls this)
+//   POST /frame                 -> page uploads the canvas as a data URL after a capture request
+//   GET  /frame                 -> read back the latest uploaded frame
 //
 // KV layout (binding RAIN_KV):
 //   "control"            -> JSON blob of current LIVE params
 //   "touches"             -> JSON array of {t, dist} objects, capped
 //   "snapshots"            -> JSON array of snapshot objects, capped
+//   "captureAt"            -> timestamp of the most recent capture request
+//   "frame"                -> {t, dataUrl} of the most recently uploaded canvas frame
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -111,6 +117,33 @@ export default {
       var list = raw3 ? JSON.parse(raw3) : [];
       if (since > 0) list = list.filter(function (s) { return s.t > since; });
       return json(list);
+    }
+
+    // ---- frame capture ----
+    if (path === '/capture' && request.method === 'POST') {
+      if (request.headers.get('X-Auth') !== env.CONTROL_SECRET) {
+        return json({ ok: false, error: 'unauthorized' }, 401);
+      }
+      await env.RAIN_KV.put('captureAt', String(Date.now()));
+      return json({ ok: true });
+    }
+
+    if (path === '/capture' && request.method === 'GET') {
+      var at = await env.RAIN_KV.get('captureAt');
+      return json({ at: at ? +at : 0 });
+    }
+
+    if (path === '/frame' && request.method === 'POST') {
+      var f = {};
+      try { f = await request.json(); } catch (e) {}
+      if (!f.dataUrl) return json({ ok: false, error: 'missing dataUrl' }, 400);
+      await env.RAIN_KV.put('frame', JSON.stringify({ t: Date.now(), dataUrl: f.dataUrl }));
+      return json({ ok: true });
+    }
+
+    if (path === '/frame' && request.method === 'GET') {
+      var raw4 = await env.RAIN_KV.get('frame');
+      return json(raw4 ? JSON.parse(raw4) : {});
     }
 
     return json({ ok: false, error: 'not found' }, 404);
