@@ -777,17 +777,24 @@ function handleOri(e) {
   gy = sy / len * mag;
 }
 
-// No button: the first touch anywhere doubles as the permission gesture.
+// No button: lifting a finger doubles as the permission gesture.
+// iOS only honours requestPermission() from a click or touchend — touchstart
+// does not count, and a preventDefault() before the call voids the activation.
+// gyroActive is set only once permission actually lands, so a refusal or a
+// mistimed gesture can still be retried on the next lift.
 function activateGyro() {
   if (gyroActive) return;
-  gyroActive = true;
 
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function') {
     DeviceOrientationEvent.requestPermission().then(function (st) {
-      if (st === 'granted') window.addEventListener('deviceorientation', handleOri);
+      if (st === 'granted') {
+        gyroActive = true;
+        window.addEventListener('deviceorientation', handleOri);
+      }
     }).catch(function () {});
   } else {
+    gyroActive = true;
     window.addEventListener('deviceorientation', handleOri);
   }
 }
@@ -845,7 +852,6 @@ function pointerEnd() {
 
 canvas.addEventListener('touchstart', function (e) {
   e.preventDefault();
-  activateGyro();                       // first touch is the permission gesture
   pointerStart(e.touches[0].clientX, e.touches[0].clientY);
 });
 canvas.addEventListener('touchmove', function (e) {
@@ -856,7 +862,13 @@ canvas.addEventListener('touchmove', function (e) {
   }
   pointerMove(e.touches[0].clientX, e.touches[0].clientY);
 });
-canvas.addEventListener('touchend', function (e) { e.preventDefault(); pointerEnd(); });
+canvas.addEventListener('touchend', function (e) {
+  // activateGyro() first, while the touchend user activation is still valid —
+  // preventDefault() below would otherwise void it on iOS.
+  activateGyro();
+  e.preventDefault();
+  pointerEnd();
+});
 canvas.addEventListener('touchcancel', function () { pointerEnd(); });
 
 canvas.addEventListener('mousedown', function (e) { activateGyro(); pointerStart(e.clientX, e.clientY); });
