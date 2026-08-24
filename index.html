@@ -809,6 +809,8 @@ function stir(sx, sy, dxPx, dyPx) {
   var len = Math.sqrt(dxPx * dxPx + dyPx * dyPx);
   if (len < 0.5) return;                     // a still finger does nothing
 
+  touchDragDist += len;   // relay: only a real drag counts as a "touch event"
+
   // screen px -> sim cells, and per-frame delta -> velocity
   var cx = sx / W * simW, cy = sy / H * simH;
   var dirX = dxPx / len, dirY = dyPx / len;
@@ -830,6 +832,8 @@ function stir(sx, sy, dxPx, dyPx) {
 function pointerStart(sx, sy) {
   pointerDown = true;
   lastPX = sx; lastPY = sy; hasLast = true;
+  touchDragDist = 0;
+  touchReported = false;
 }
 function pointerMove(sx, sy) {
   if (!pointerDown || !hasLast) return;
@@ -838,6 +842,7 @@ function pointerMove(sx, sy) {
 }
 function pointerEnd() {
   pointerDown = false; hasLast = false;
+  reportTouchIfReal();
 }
 
 canvas.addEventListener('touchstart', function (e) {
@@ -1352,6 +1357,55 @@ window.liveConfig = {
     return this.set(key, CONFIG[key]);
   }
 };
+
+// ============================================================
+//  rain-relay — Cloudflare Worker bridge
+//  控制通道：轮询 /control 拉取远程参数
+//  触碰通道：只有真实拖拽（累计距离超过阈值）才上报，一次拖拽只报一次
+//  快照通道：定时把当前状态写进去，纯被动存储，没人主动去读不会怎样
+// ============================================================
+
+var RELAY = 'https://rain-relay.innsuanw.workers.dev';
+
+var touchDragDist = 0;
+var TOUCH_MIN_DIST = 40;     // px，累计拖拽距离小于这个不算一次触碰
+var touchReported = false;   // 这次拖拽会话是否已经报过了
+
+function reportTouchIfReal() {
+  if (touchReported || touchDragDist < TOUCH_MIN_DIST) return;
+  touchReported = true;
+  fetch(RELAY + '/touch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dist: Math.round(touchDragDist) })
+  }).catch(function () {});
+}
+
+function pollControl() {
+  fetch(RELAY + '/control?t=' + Date.now())
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (data && Object.keys(data).length) window.liveConfig.setMany(data);
+    })
+    .catch(function () {});
+}
+setInterval(pollControl, 5000);
+
+function sendSnapshot() {
+  fetch(RELAY + '/snapshot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      wind: +currentWindForce.toFixed(2),
+      tideAngle: +tideAngle.toFixed(3),
+      particles: nP,
+      drops: nRain,
+      fps: +(1 / frameAvg).toFixed(1),
+      live: window.liveConfig.get()
+    })
+  }).catch(function () {});
+}
+setInterval(sendSnapshot, 5 * 60 * 1000);
 
 resize();
 var rt;

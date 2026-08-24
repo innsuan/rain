@@ -1,0 +1,16 @@
+name = "rain-relay"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Filled in after `wrangler kv namespace create RAIN_KV` — paste the id it prints.
+kv_namespaces = [
+  { binding = "RAIN_KV", id = "d28110903c014c258e1d296feccd6a56" }
+]
+
+[[durable_objects.bindings]]
+name = "TOUCH_HUB"
+class_name = "TouchHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TouchHub"]
