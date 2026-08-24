@@ -74,7 +74,7 @@ var CONFIG = {
   // ---- 雨 · rain ----
   // 雨量和水位分开：雨永远按 rainRate 下，水位靠排水自动调节
   rainRate: 0.1,     // 🔴 每帧从顶部落下的雨滴数，可以是小数
-  rainRateMax: 2,    // rainRate 的硬上限
+  rainRateMax: 5,    // rainRate 的硬上限
   rainMaxDrops: 700, // 空中同时存在的雨滴上限
   rainDiscrete: true,// true = 下落中的雨滴各自独立，不互推、不进网格、不参与压力
   rainImmune: true,  // true = 正在下落的雨滴不受拖拽影响
@@ -194,7 +194,7 @@ var particleRestDensity = 0.0;
 var targetP = 0;   // body size the drain regulates towards
 
 // safety clamp only — with the prevU fix this should almost never fire
-var MAX_SPEED = 20.0;
+var MAX_SPEED = 50.0;
 
 function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
 
