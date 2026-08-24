@@ -1377,6 +1377,15 @@ var touchDragDist = 0;
 var TOUCH_MIN_DIST = 40;     // px，累计拖拽距离小于这个不算一次触碰
 var touchReported = false;   // 这次拖拽会话是否已经报过了
 
+function uploadFrame() {
+  var dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+  fetch(RELAY + '/frame', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dataUrl: dataUrl })
+  }).catch(function () {});
+}
+
 function reportTouchIfReal() {
   if (touchReported || touchDragDist < TOUCH_MIN_DIST) return;
   touchReported = true;
@@ -1385,6 +1394,8 @@ function reportTouchIfReal() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ dist: Math.round(touchDragDist) })
   }).catch(function () {});
+  // 半秒后自动送一张画面过去，让水动起来之后的样子被看见
+  setTimeout(uploadFrame, 500);
 }
 
 function pollControl() {
@@ -1406,12 +1417,7 @@ function pollCapture() {
     .then(function (data) {
       if (!data || !data.at || data.at === lastCaptureAt) return;
       lastCaptureAt = data.at;
-      var dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-      fetch(RELAY + '/frame', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dataUrl: dataUrl })
-      }).catch(function () {});
+      uploadFrame();
     })
     .catch(function () {});
 }
