@@ -74,13 +74,13 @@ var CONFIG = {
   // ---- 雨 · rain ----
   // 雨量和水位分开：雨永远按 rainRate 下，水位靠排水自动调节
   rainRate: 0.1,     // 🔴 每帧从顶部落下的雨滴数，可以是小数
-  rainRateMax: 5,    // rainRate 的硬上限
+  rainRateMax: 10,   // rainRate 的硬上限
   rainMaxDrops: 700, // 空中同时存在的雨滴上限
   rainDiscrete: true,// true = 下落中的雨滴各自独立，不互推、不进网格、不参与压力
   rainImmune: true,  // true = 正在下落的雨滴不受拖拽影响
   rainTerminal: 0,   // 雨滴的终端速度（格/秒），相当于空气阻力。0 = 不限速
   rainImpact: 1,     // 落水瞬间保留多少动量。1 = 全部注入
-  rainInitialSpeed: 50, // 🔴 沿重力方向的额外初速度。0 = 不加
+  rainInitialSpeed: 50, // 沿重力方向的额外初速度。0 = 不加（不再是 LIVE，改了要重新部署）
 
   // ---- 风 · wind ----
   // 风力做一次缓慢的随机游走，风向恒定平行于陀螺仪测定的重力切线方向（不受
@@ -108,12 +108,11 @@ var LIVE_RANGES = {
   rainRate: [0, 1e6],
   waterLevel: [0.03, 0.97],
   drainSpeed: [0, 2],
-  tideAmplitude: [0, 2],   // 弧度，最多约 115°，防止摇摆角度失控
-  tidePeriod: [0.5, 120],
-  rainInitialSpeed: [0, 400],
+  tideAmplitude: [0, 1],   // 弧度，最多约 57°，防止摇摆角度失控
+  tidePeriod: [1.5, 120],  // 太短的周期水根本来不及摆动，视觉上只是抖动
   flipRatio: [0, 0.99],
-  windMin: [0, 1e6],
-  windMax: [0, 1e6],
+  windMin: [0, 150],
+  windMax: [0, 150],
   windChangeSpeed: [0.02, 10],
 };
 
@@ -124,7 +123,6 @@ var LIVE = {
   drainSpeed: CONFIG.drainSpeed,
   tideAmplitude: CONFIG.tideAmplitude,
   tidePeriod: CONFIG.tidePeriod,
-  rainInitialSpeed: CONFIG.rainInitialSpeed,
   flipRatio: CONFIG.flipRatio,
   windMin: CONFIG.windMin,
   windMax: CONFIG.windMax,
@@ -890,15 +888,28 @@ var rainCarry = 0;    // fractional leftover, so rainRate can be 0.2
 function spawnRainDrop(slot) {
   var lo = 1.2, hiX = simW - 1.2, hiY = simH - 1.2;
 
-  var ux = gravDownX, uy = gravDownY;          // unit "down" (shared)
-  var qx = gravTanX, qy = gravTanY;            // unit "along the surface" (shared)
+  // Wind is sampled once, right now, and frozen for this drop's whole flight
+  // (integrateParticles never re-adds wind to a falling drop — only gravity
+  // does). So the drop's initial velocity IS its flight direction for the
+  // entire fall; the spawn band has to be built from that combined vector,
+  // not from pure gravity, or strong wind blows the drops sideways out from
+  // under a spawn line that never leaned into the wind, leaving a gap on the
+  // downwind side.
+  var speed = 2 + Math.random() * 3 + CONFIG.rainInitialSpeed;
+  var vx0 = gravDownX * speed + currentWindDirX * currentWindForce;
+  var vy0 = gravDownY * speed + currentWindDirY * currentWindForce;
+  var vLen = Math.sqrt(vx0 * vx0 + vy0 * vy0);
+
+  var ux = gravDownX, uy = gravDownY;   // fallback if velocity is somehow ~0
+  if (vLen > 1e-6) { ux = vx0 / vLen; uy = vy0 / vLen; }
+  var qx = -uy, qy = ux;                // tangent to the actual flight direction
 
   var cx = (lo + hiX) * 0.5, cy = (lo + hiY) * 0.5;
 
-  // Full span of the box along the surface direction. Picking a point here
-  // first is the whole trick: the spawn band then hugs both upwind edges at
-  // full width. Anchoring on the single most-upwind corner instead produces a
-  // short diagonal sliver, which is what rain used to fall from.
+  // Full span of the box along the flight-tangent direction. Picking a point
+  // here first is the whole trick: the spawn band then hugs both upwind edges
+  // at full width. Anchoring on the single most-upwind corner instead
+  // produces a short diagonal sliver, which is what rain used to fall from.
   var tMin = Infinity, tMax = -Infinity;
   var xs = [lo, hiX], ys = [lo, hiY];
   for (var a = 0; a < 2; a++) {
@@ -912,7 +923,7 @@ function spawnRainDrop(slot) {
   var tt = tMin + Math.random() * (tMax - tMin);
   var ax = cx + qx * tt, ay = cy + qy * tt;
 
-  // walk back up the gravity ray from that point to where it enters the box
+  // walk back up the flight-direction ray from that point to where it enters the box
   var s0 = -1e9, s1 = 1e9;
   if (Math.abs(ux) < 1e-6) { if (ax < lo || ax > hiX) return false; }
   else {
@@ -936,13 +947,8 @@ function spawnRainDrop(slot) {
 
   px[slot] = clamp(ax + ux * sp, lo, hiX);
   py[slot] = clamp(ay + uy * sp, lo, hiY);
-
-  // Wind is sampled at spawn time only: a drop freezes whatever vector was
-  // current the instant it appears, so a later gust doesn't reach back and
-  // curve a drop that's already falling — it just tilts drops spawned after.
-  var speed = 2 + Math.random() * 3 + LIVE.rainInitialSpeed;
-  pvx[slot] = ux * speed + currentWindDirX * currentWindForce;
-  pvy[slot] = uy * speed + currentWindDirY * currentWindForce;
+  pvx[slot] = vx0;
+  pvy[slot] = vy0;
   return true;
 }
 var drainCarry = 0;   // same idea for the drain side
