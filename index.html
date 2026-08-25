@@ -61,8 +61,9 @@ var CONFIG = {
   drainBand: 3,      // 底部多少格内的水可以被排走
   maxParticles: 12000,     // 粒子总数上限
   particlesPerCell: 9,     // 一格水体由多少颗粒子构成
-  flipRatio: 0.975,  // 保留多少粒子自身的速度。调低只是让水不抖，
-                     // 不会变稠——真正的稠度看 viscosity。静态，不再远程可调。
+  flipRatio: 0.975,  // 🔴 粒子保留多少自身速度。高 = 各走各的、碎、活；
+                     // 低 = 都听网格的、整齐、像一整块在动。
+                     // 它不产生摩擦，但压低它，网格上的 viscosity 才传得进来。
   viscosity: 0,      // 🔴 0 = 水，0.5 = 糖浆。速度场的邻域扩散，
                      // 让快的拖慢的、慢的拖快的——动量真的在流体内部传递。
   viscIters: 2,      // 粘性扩散的迭代轮数
@@ -119,6 +120,7 @@ var LIVE_RANGES = {
   drainSpeed: [0, 2],
   tideAmplitude: [0, 1],   // 弧度，最多约 57°，防止摇摆角度失控
   tidePeriod: [1.5, 120],  // 太短的周期水根本来不及摆动，视觉上只是抖动
+  flipRatio: [0, 0.99],
   viscosity: [0, 0.5],     // 上限再高扩散会发散
   windMin: [0, 150],
   windMax: [0, 150],
@@ -132,6 +134,7 @@ var LIVE = {
   drainSpeed: CONFIG.drainSpeed,
   tideAmplitude: CONFIG.tideAmplitude,
   tidePeriod: CONFIG.tidePeriod,
+  flipRatio: CONFIG.flipRatio,
   viscosity: CONFIG.viscosity,
   windMin: CONFIG.windMin,
   windMax: CONFIG.windMax,
@@ -702,7 +705,7 @@ function transferToParticles() {
 
     var picU  = w00 * u[a]     + w10 * u[b]     + w01 * u[c]     + w11 * u[d];
     var oldU  = w00 * prevU[a] + w10 * prevU[b] + w01 * prevU[c] + w11 * prevU[d];
-    pvx[p] = CONFIG.flipRatio * (pvx[p] + (picU - oldU)) + (1 - CONFIG.flipRatio) * picU;
+    pvx[p] = LIVE.flipRatio * (pvx[p] + (picU - oldU)) + (1 - LIVE.flipRatio) * picU;
 
     x = px[p] - 0.5; y = py[p];
     i0 = clamp(Math.floor(x), 0, simW - 2); j0 = clamp(Math.floor(y), 0, simH - 2);
@@ -712,7 +715,7 @@ function transferToParticles() {
 
     var picV  = w00 * v[a]     + w10 * v[b]     + w01 * v[c]     + w11 * v[d];
     var oldV  = w00 * prevV[a] + w10 * prevV[b] + w01 * prevV[c] + w11 * prevV[d];
-    pvy[p] = CONFIG.flipRatio * (pvy[p] + (picV - oldV)) + (1 - CONFIG.flipRatio) * picV;
+    pvy[p] = LIVE.flipRatio * (pvy[p] + (picV - oldV)) + (1 - LIVE.flipRatio) * picV;
 
     var sp2 = pvx[p] * pvx[p] + pvy[p] * pvy[p];
     if (sp2 > maxSp2) {
