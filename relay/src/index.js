@@ -27,6 +27,11 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type,X-Auth',
 };
 
+function clamp01(v) {
+  var n = +v;
+  return isFinite(n) ? Math.min(Math.max(n, 0), 1) : 0.5;
+}
+
 function json(data, status) {
   return new Response(JSON.stringify(data), {
     status: status || 200,
@@ -102,8 +107,9 @@ export default {
       return json({ ok: true });
     }
 
-    // ---- snapshots (pulled on demand, never pushed) ----
-    if (path === '/snapshot' && request.method === 'POST') {
+    // ---- state readings (pulled on demand, never pushed) ----
+    // /snapshot is kept as an alias so an un-refreshed page keeps reporting.
+    if ((path === '/state' || path === '/snapshot') && request.method === 'POST') {
       var snap = {};
       try { snap = await request.json(); } catch (e) {}
       snap.t = Date.now();
@@ -111,12 +117,35 @@ export default {
       return json({ ok: true });
     }
 
-    if (path === '/snapshot' && request.method === 'GET') {
+    if ((path === '/state' || path === '/snapshot') && request.method === 'GET') {
       var since = +url.searchParams.get('since') || 0;
       var raw3 = await env.RAIN_KV.get('snapshots');
       var list = raw3 ? JSON.parse(raw3) : [];
       if (since > 0) list = list.filter(function (s) { return s.t > since; });
       return json(list);
+    }
+
+    // ---- stir: a stroke drawn across the water from this side ----
+    // Coordinates are normalized 0-1 so they mean the same thing on any screen.
+    if (path === '/stir' && request.method === 'POST') {
+      if (request.headers.get('X-Auth') !== env.CONTROL_SECRET) {
+        return json({ ok: false, error: 'unauthorized' }, 401);
+      }
+      var st = {};
+      try { st = await request.json(); } catch (e) {}
+      var stroke = {
+        at: Date.now(),
+        x0: clamp01(st.x0), y0: clamp01(st.y0),
+        x1: clamp01(st.x1), y1: clamp01(st.y1),
+        steps: Math.min(Math.max(+st.steps || 12, 1), 60),
+      };
+      await env.RAIN_KV.put('stir', JSON.stringify(stroke));
+      return json({ ok: true });
+    }
+
+    if (path === '/stir' && request.method === 'GET') {
+      var rawStir = await env.RAIN_KV.get('stir');
+      return json(rawStir ? JSON.parse(rawStir) : { at: 0 });
     }
 
     // ---- frame capture ----
