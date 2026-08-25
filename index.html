@@ -66,7 +66,8 @@ var CONFIG = {
                      // 它不产生摩擦，但压低它，网格上的 viscosity 才传得进来。
   viscosity: 0,      // 🔴 0 = 水，0.5 = 糖浆。速度场的邻域扩散，
                      // 让快的拖慢的、慢的拖快的——动量真的在流体内部传递。
-  viscIters: 2,      // 粘性扩散的迭代轮数
+  viscIters: 6,      // 🔴 粘性扩散的迭代轮数。单轮 k 不能超过 0.5（会发散），
+                     // 想更稠就多跑几轮 —— 效果叠加，稳定性不变。
   pressureIters: 20, // 压力迭代次数，越高水越不可压缩，越贵
   particleIters: 2,  // 粒子互推的迭代次数
   driftK: 1.0,       // 密度补偿强度，防止结块和空洞
@@ -121,7 +122,8 @@ var LIVE_RANGES = {
   tideAmplitude: [0, 1],   // 弧度，最多约 57°，防止摇摆角度失控
   tidePeriod: [1.5, 120],  // 太短的周期水根本来不及摆动，视觉上只是抖动
   flipRatio: [0, 0.99],
-  viscosity: [0, 0.5],     // 上限再高扩散会发散
+  viscosity: [0, 0.5],     // 单轮上限，再高扩散会发散；想更稠调 viscIters
+  viscIters: [1, 12],
   windMin: [0, 150],
   windMax: [0, 150],
   windChangeSpeed: [0.02, 10],
@@ -136,6 +138,7 @@ var LIVE = {
   tidePeriod: CONFIG.tidePeriod,
   flipRatio: CONFIG.flipRatio,
   viscosity: CONFIG.viscosity,
+  viscIters: CONFIG.viscIters,
   windMin: CONFIG.windMin,
   windMax: CONFIG.windMax,
   windChangeSpeed: CONFIG.windChangeSpeed,
@@ -754,7 +757,7 @@ function diffuseVelocities() {
     viscU = new Float32Array(numCells);
     viscV = new Float32Array(numCells);
   }
-  for (var pass = 0; pass < CONFIG.viscIters; pass++) {
+  for (var pass = 0; pass < LIVE.viscIters; pass++) {
     viscU.set(u); viscV.set(v);
     for (var i = 1; i < simW - 1; i++) {
       for (var j = 1; j < simH - 1; j++) {
