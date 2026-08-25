@@ -844,6 +844,7 @@ function pointerStart(sx, sy) {
   lastPX = sx; lastPY = sy; hasLast = true;
   touchDragDist = 0;
   touchReported = false;
+  touchX0 = sx; touchY0 = sy;      // relay: 起点，归一化后随事件一起上报
 }
 function pointerMove(sx, sy) {
   if (!pointerDown || !hasLast) return;
@@ -1393,6 +1394,7 @@ window.liveConfig = {
 var RELAY = 'https://rain-relay.innsuanw.workers.dev';
 
 var touchDragDist = 0;
+var touchX0 = 0, touchY0 = 0;   // 这次拖拽的起点（屏幕 px）
 var TOUCH_MIN_DIST = 40;     // px，累计拖拽距离小于这个不算一次触碰
 var touchReported = false;   // 这次拖拽会话是否已经报过了
 
@@ -1448,10 +1450,19 @@ function tickBlend() {
 function reportTouchIfReal() {
   if (touchReported || touchDragDist < TOUCH_MIN_DIST) return;
   touchReported = true;
+  // 起止用归一化坐标，跟 /stir 同一种格式；straight = 直线距离 / 路径长度，
+  // 1 = 笔直，越小越绕。不用存采样点，两个已有的量一除就够。
+  var chord = Math.sqrt((lastPX - touchX0) * (lastPX - touchX0) +
+                        (lastPY - touchY0) * (lastPY - touchY0));
   fetch(RELAY + '/touch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dist: Math.round(touchDragDist) })
+    body: JSON.stringify({
+      dist: Math.round(touchDragDist),
+      x0: +(touchX0 / W).toFixed(3), y0: +(touchY0 / H).toFixed(3),
+      x1: +(lastPX / W).toFixed(3),  y1: +(lastPY / H).toFixed(3),
+      straight: +(chord / Math.max(touchDragDist, 1)).toFixed(2)
+    })
   }).catch(function () {});
   // 半秒后自动送一张画面过去，让水动起来之后的样子被看见
   setTimeout(uploadFrame, 500);
