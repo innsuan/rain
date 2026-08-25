@@ -1528,13 +1528,13 @@ function tickStir() {
 function roughness() {
   if (!occ) return 0;
   var wet = 0, edge = 0;
-  for (var r = 0; r < displayRows; r++) {
-    for (var c = 0; c < displayCols; c++) {
-      if (!occ[r * displayCols + c]) continue;
+  for (var r = 0; r < simH; r++) {
+    for (var c = 0; c < simW; c++) {
+      if (!occ[r * simW + c]) continue;
       wet++;
-      if (c === 0 || c === displayCols - 1 || r === 0 || r === displayRows - 1 ||
-          !occ[r * displayCols + c - 1] || !occ[r * displayCols + c + 1] ||
-          !occ[(r - 1) * displayCols + c] || !occ[(r + 1) * displayCols + c]) edge++;
+      if (c === 0 || c === simW - 1 || r === 0 || r === simH - 1 ||
+          !occ[r * simW + c - 1] || !occ[r * simW + c + 1] ||
+          !occ[(r - 1) * simW + c] || !occ[(r + 1) * simW + c]) edge++;
     }
   }
   return wet ? edge / wet : 0;
