@@ -1504,13 +1504,15 @@ setInterval(pollControl, 5000);
 
 // capture: I remotely POST /capture, the page polls, notices the timestamp
 // changed, and uploads a canvas snapshot — purely reactive, never spontaneous
-var lastCaptureAt = 0;
+var lastCaptureAt = -1;   // same first-poll rule as /stir below
 function pollCapture() {
   fetch(RELAY + '/capture?t=' + Date.now())
     .then(function (r) { return r.json(); })
     .then(function (data) {
       if (!data || !data.at || data.at === lastCaptureAt) return;
+      var firstPoll = lastCaptureAt === -1;
       lastCaptureAt = data.at;
+      if (firstPoll) return;
       uploadFrame();
     })
     .catch(function () {});
@@ -1520,7 +1522,10 @@ setInterval(pollCapture, 5000);
 // stir: the other direction of a touch. I POST a stroke, the page notices the
 // timestamp changed and draws it across the water over a few frames — the same
 // stir() a finger uses, so it lands with the same weight.
-var lastStirAt = 0;
+// The stored stroke outlives the page. On the very first poll after a load,
+// whatever is sitting in KV is history, not an instruction — record it and
+// do nothing, or every refresh replays the last stroke a second or two in.
+var lastStirAt = -1;
 var stirQueue = null;   // {x0,y0,x1,y1,steps,i} in screen px
 
 function pollStir() {
@@ -1528,7 +1533,9 @@ function pollStir() {
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (!d || !d.at || d.at === lastStirAt) return;
+      var firstPoll = lastStirAt === -1;
       lastStirAt = d.at;
+      if (firstPoll) return;
       // normalized 0-1 coords so it doesn't matter what screen it lands on
       var x0 = (d.x0 != null ? d.x0 : 0.5) * W, y0 = (d.y0 != null ? d.y0 : 0.5) * H;
       var x1 = (d.x1 != null ? d.x1 : 0.5) * W, y1 = (d.y1 != null ? d.y1 : 0.5) * H;
