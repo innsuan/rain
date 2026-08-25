@@ -1,7 +1,12 @@
 <!DOCTYPE html>
 <meta charset="utf-8">
-<title>雨 · fast</title>
+<title>雨</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<link rel="manifest" href="manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="雨">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0a0e17">
 <style>
   * { margin: 0; padding: 0; }
   body {
@@ -33,7 +38,7 @@ var CONFIG = {
   // ---- 图像 · visual ----
   block: 4,          // 方块边长（CSS 像素）
   gap: 8,            // 方块之间的缝隙
-  maxCells: 2115,    // 格子数上限，卡顿就调小
+  maxCells: 1410,    // 格子数上限，卡顿就调小
   r: 91, g: 163, b: 181,   // 🔴 水色默认值，默认 #5ba3b5。实时改水色用 LIVE.r/g/b
   bg: '#0a0e17',           // 背景色
   surfaceFade: 0,          // 0 = 颜色完全均匀；0.3-0.5 = 水面边缘柔化
@@ -105,8 +110,8 @@ var CONFIG = {
 
 var LIVE_RANGES = {
   r: [0, 255], g: [0, 255], b: [0, 255],
-  rainRate: [0, 1e6],
-  waterLevel: [0.03, 0.97],
+  rainRate: [0, 10],
+  waterLevel: [0.1, 0.9],
   drainSpeed: [0, 2],
   tideAmplitude: [0, 1],   // 弧度，最多约 57°，防止摇摆角度失控
   tidePeriod: [1.5, 120],  // 太短的周期水根本来不及摆动，视觉上只是抖动
@@ -192,7 +197,7 @@ var particleRestDensity = 0.0;
 var targetP = 0;   // body size the drain regulates towards
 
 // safety clamp only — with the prevU fix this should almost never fire
-var MAX_SPEED = 50.0;
+var MAX_SPEED = 75.0;
 
 function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
 
@@ -1303,6 +1308,8 @@ function loop(ts) {
 
   trackFrame(frameSec);
   updateGravityBasis();   // gx,gy don't change again until the next gyro event
+  tickStir();             // a remote stroke, drawn a slice per frame
+  tickBlend();            // multi-exposure frame grab, if one is in progress
 
   // split the frame so it's obvious which half to attack. 'idle' is whatever
   // the browser spends outside our code — compositing, vsync wait, GC.
@@ -1389,8 +1396,48 @@ var touchDragDist = 0;
 var TOUCH_MIN_DIST = 40;     // px，累计拖拽距离小于这个不算一次触碰
 var touchReported = false;   // 这次拖拽会话是否已经报过了
 
+// Three exposures 80ms apart, averaged into one frame. Still water stays
+// sharp; anything moving smears into a short streak — the picture carries a
+// little of the motion instead of freezing it dead.
+var blendCanvas = null, blendCtx = null;
+var FRAME_EXPOSURES = 3;
+var FRAME_GAP_FRAMES = 5;   // frames, not ms — on a phone that drops frames,
+                            // a ms delay can land twice inside one rendered frame
+var blendPending = 0;       // frames left to wait before the next exposure
+var blendShot = -1;         // -1 = idle
+
 function uploadFrame() {
-  var dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+  if (blendShot >= 0) return;               // one blend at a time
+  if (!blendCanvas) {
+    blendCanvas = document.createElement('canvas');
+    blendCtx = blendCanvas.getContext('2d');
+  }
+  if (blendCanvas.width !== canvas.width || blendCanvas.height !== canvas.height) {
+    blendCanvas.width = canvas.width;
+    blendCanvas.height = canvas.height;
+  }
+  blendCtx.globalAlpha = 1;
+  blendCtx.fillStyle = CONFIG.bg;
+  blendCtx.fillRect(0, 0, blendCanvas.width, blendCanvas.height);
+  blendShot = 0;
+  blendPending = 0;
+}
+
+// called once per rendered frame from loop()
+function tickBlend() {
+  if (blendShot < 0) return;
+  if (blendPending > 0) { blendPending--; return; }
+
+  // running average: each new exposure gets weight 1/(n+1)
+  blendCtx.globalAlpha = 1 / (blendShot + 1);
+  blendCtx.drawImage(canvas, 0, 0);
+  blendShot++;
+
+  if (blendShot < FRAME_EXPOSURES) { blendPending = FRAME_GAP_FRAMES; return; }
+
+  blendCtx.globalAlpha = 1;
+  var dataUrl = blendCanvas.toDataURL('image/jpeg', 0.85);
+  blendShot = -1;
   fetch(RELAY + '/frame', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1435,21 +1482,75 @@ function pollCapture() {
 }
 setInterval(pollCapture, 5000);
 
-function sendSnapshot() {
-  fetch(RELAY + '/snapshot', {
+// stir: the other direction of a touch. I POST a stroke, the page notices the
+// timestamp changed and draws it across the water over a few frames — the same
+// stir() a finger uses, so it lands with the same weight.
+var lastStirAt = 0;
+var stirQueue = null;   // {x0,y0,x1,y1,steps,i} in screen px
+
+function pollStir() {
+  fetch(RELAY + '/stir?t=' + Date.now())
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d || !d.at || d.at === lastStirAt) return;
+      lastStirAt = d.at;
+      // normalized 0-1 coords so it doesn't matter what screen it lands on
+      var x0 = (d.x0 != null ? d.x0 : 0.5) * W, y0 = (d.y0 != null ? d.y0 : 0.5) * H;
+      var x1 = (d.x1 != null ? d.x1 : 0.5) * W, y1 = (d.y1 != null ? d.y1 : 0.5) * H;
+      stirQueue = { x0: x0, y0: y0, x1: x1, y1: y1, steps: d.steps || 12, i: 0 };
+    })
+    .catch(function () {});
+}
+setInterval(pollStir, 5000);
+
+// called once per rendered frame from loop()
+function tickStir() {
+  if (!stirQueue) return;
+  var q = stirQueue;
+  var t0 = q.i / q.steps, t1 = (q.i + 1) / q.steps;
+  var ax = q.x0 + (q.x1 - q.x0) * t0, ay = q.y0 + (q.y1 - q.y0) * t0;
+  var bx = q.x0 + (q.x1 - q.x0) * t1, by = q.y0 + (q.y1 - q.y0) * t1;
+  stir(bx, by, bx - ax, by - ay);
+  q.i++;
+  if (q.i >= q.steps) stirQueue = null;
+}
+
+// How broken-up the water is: the fraction of occupied cells that touch at
+// least one empty one. Still water is nearly all interior (~0.1); a stirred
+// or rained-on body is mostly edge (0.4+). One pass over the display grid.
+function roughness() {
+  if (!occ) return 0;
+  var wet = 0, edge = 0;
+  for (var r = 0; r < displayRows; r++) {
+    for (var c = 0; c < displayCols; c++) {
+      if (!occ[r * displayCols + c]) continue;
+      wet++;
+      if (c === 0 || c === displayCols - 1 || r === 0 || r === displayRows - 1 ||
+          !occ[r * displayCols + c - 1] || !occ[r * displayCols + c + 1] ||
+          !occ[(r - 1) * displayCols + c] || !occ[(r + 1) * displayCols + c]) edge++;
+    }
+  }
+  return wet ? edge / wet : 0;
+}
+
+// /state — the instrument reading. Numbers only; when I want the picture I
+// ask for a frame and look at it myself.
+function sendState() {
+  var live = window.liveConfig.get();
+  fetch(RELAY + '/state', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      rain: live.rainRate,
       wind: +currentWindForce.toFixed(2),
-      tideAngle: +tideAngle.toFixed(3),
-      particles: nP,
-      drops: nRain,
-      fps: +(1 / frameAvg).toFixed(1),
-      live: window.liveConfig.get()
+      tide: +tideAngle.toFixed(3),
+      level: +live.waterLevel.toFixed(3),
+      rough: +roughness().toFixed(3),
+      fps: +(1 / frameAvg).toFixed(1)
     })
   }).catch(function () {});
 }
-setInterval(sendSnapshot, 5 * 60 * 1000);
+setInterval(sendState, 5 * 60 * 1000);
 
 resize();
 var rt;

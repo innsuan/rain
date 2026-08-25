@@ -1,0 +1,9 @@
+{
+  "name": "雨",
+  "short_name": "雨",
+  "display": "fullscreen",
+  "background_color": "#0a0e17",
+  "theme_color": "#0a0e17",
+  "orientation": "any",
+  "start_url": "./"
+}
