@@ -61,7 +61,11 @@ var CONFIG = {
   drainBand: 3,      // 底部多少格内的水可以被排走
   maxParticles: 12000,     // 粒子总数上限
   particlesPerCell: 9,     // 一格水体由多少颗粒子构成
-  flipRatio: 0.975,   // 🔴 0 = 粘稠如蜂蜜，0.97 = 活泼但会抖
+  flipRatio: 0.975,  // 保留多少粒子自身的速度。调低只是让水不抖，
+                     // 不会变稠——真正的稠度看 viscosity。静态，不再远程可调。
+  viscosity: 0,      // 🔴 0 = 水，0.5 = 糖浆。速度场的邻域扩散，
+                     // 让快的拖慢的、慢的拖快的——动量真的在流体内部传递。
+  viscIters: 2,      // 粘性扩散的迭代轮数
   pressureIters: 20, // 压力迭代次数，越高水越不可压缩，越贵
   particleIters: 2,  // 粒子互推的迭代次数
   driftK: 1.0,       // 密度补偿强度，防止结块和空洞
@@ -115,7 +119,7 @@ var LIVE_RANGES = {
   drainSpeed: [0, 2],
   tideAmplitude: [0, 1],   // 弧度，最多约 57°，防止摇摆角度失控
   tidePeriod: [1.5, 120],  // 太短的周期水根本来不及摆动，视觉上只是抖动
-  flipRatio: [0, 0.99],
+  viscosity: [0, 0.5],     // 上限再高扩散会发散
   windMin: [0, 150],
   windMax: [0, 150],
   windChangeSpeed: [0.02, 10],
@@ -128,7 +132,7 @@ var LIVE = {
   drainSpeed: CONFIG.drainSpeed,
   tideAmplitude: CONFIG.tideAmplitude,
   tidePeriod: CONFIG.tidePeriod,
-  flipRatio: CONFIG.flipRatio,
+  viscosity: CONFIG.viscosity,
   windMin: CONFIG.windMin,
   windMax: CONFIG.windMax,
   windChangeSpeed: CONFIG.windChangeSpeed,
@@ -197,7 +201,7 @@ var particleRestDensity = 0.0;
 var targetP = 0;   // body size the drain regulates towards
 
 // safety clamp only — with the prevU fix this should almost never fire
-var MAX_SPEED = 75.0;
+var MAX_SPEED = 62.5;
 
 function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
 
@@ -698,7 +702,7 @@ function transferToParticles() {
 
     var picU  = w00 * u[a]     + w10 * u[b]     + w01 * u[c]     + w11 * u[d];
     var oldU  = w00 * prevU[a] + w10 * prevU[b] + w01 * prevU[c] + w11 * prevU[d];
-    pvx[p] = LIVE.flipRatio * (pvx[p] + (picU - oldU)) + (1 - LIVE.flipRatio) * picU;
+    pvx[p] = CONFIG.flipRatio * (pvx[p] + (picU - oldU)) + (1 - CONFIG.flipRatio) * picU;
 
     x = px[p] - 0.5; y = py[p];
     i0 = clamp(Math.floor(x), 0, simW - 2); j0 = clamp(Math.floor(y), 0, simH - 2);
@@ -708,7 +712,7 @@ function transferToParticles() {
 
     var picV  = w00 * v[a]     + w10 * v[b]     + w01 * v[c]     + w11 * v[d];
     var oldV  = w00 * prevV[a] + w10 * prevV[b] + w01 * prevV[c] + w11 * prevV[d];
-    pvy[p] = LIVE.flipRatio * (pvy[p] + (picV - oldV)) + (1 - LIVE.flipRatio) * picV;
+    pvy[p] = CONFIG.flipRatio * (pvy[p] + (picV - oldV)) + (1 - CONFIG.flipRatio) * picV;
 
     var sp2 = pvx[p] * pvx[p] + pvy[p] * pvy[p];
     if (sp2 > maxSp2) {
@@ -729,8 +733,36 @@ function simulate() {
   updateParticleDensity();
   retireLandedRain();
   solveIncompressibility();
+  diffuseVelocities();
   extrapolateVelocities();
   transferToParticles();
+}
+
+// Viscosity: momentum spreads between neighbouring fluid cells, so fast water
+// drags slow water along and slow water holds fast water back. This is the
+// thing flipRatio never did — it only decided how much single-particle noise
+// survived. Explicit Laplacian diffusion, a couple of passes, skipped entirely
+// when viscosity is 0.
+var viscU = null, viscV = null;
+function diffuseVelocities() {
+  var k = LIVE.viscosity;
+  if (!(k > 0)) return;
+  if (!viscU || viscU.length !== numCells) {
+    viscU = new Float32Array(numCells);
+    viscV = new Float32Array(numCells);
+  }
+  for (var pass = 0; pass < CONFIG.viscIters; pass++) {
+    viscU.set(u); viscV.set(v);
+    for (var i = 1; i < simW - 1; i++) {
+      for (var j = 1; j < simH - 1; j++) {
+        var c = i + j * simW;
+        if (cellType[c] !== FLUID) continue;
+        var l = c - 1, r = c + 1, b = c - simW, t = c + simW;
+        u[c] = viscU[c] + k * ((viscU[l] + viscU[r] + viscU[b] + viscU[t]) * 0.25 - viscU[c]);
+        v[c] = viscV[c] + k * ((viscV[l] + viscV[r] + viscV[b] + viscV[t]) * 0.25 - viscV[c]);
+      }
+    }
+  }
 }
 
 // ---- Gyroscope ----
