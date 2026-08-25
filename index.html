@@ -1549,6 +1549,10 @@ function sendState() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       rain: live.rainRate,
+      // diagnostic: what the screen claims about its own rotation
+      ang: screenAngle(),
+      otype: (screen && screen.orientation && screen.orientation.type) || '?',
+      wh: W + 'x' + H,
       wind: +currentWindForce.toFixed(2),
       tide: +tideAngle.toFixed(3),
       level: +live.waterLevel.toFixed(3),
