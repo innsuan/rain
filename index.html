@@ -733,65 +733,36 @@ function simulate() {
   updateParticleDensity();
   retireLandedRain();
   solveIncompressibility();
+  diffuseVelocities();
   extrapolateVelocities();
   transferToParticles();
-  dragNeighbours();
 }
 
-// Viscosity, done on the particles instead of the grid.
-//
-// The grid version is the physical one, but at flipRatio 0.975 a particle
-// keeps 97.5% of its own velocity and only listens to the grid for 2.5% —
-// so anything written into the grid barely reaches the water. Doing it here,
-// after the transfer, means it actually lands: each particle gets pulled
-// toward the average velocity of whoever is within minDist of it. Fast water
-// drags slow water; slow water holds fast water back.
-//
-// Not physically derived. Visible, which is what this is for.
-var viscVx = null, viscVy = null;
-function dragNeighbours() {
+// Viscosity: momentum spreads between neighbouring fluid cells, so fast water
+// drags slow water along and slow water holds fast water back. This is the
+// thing flipRatio never did — it only decided how much single-particle noise
+// survived. Explicit Laplacian diffusion, a couple of passes, skipped entirely
+// when viscosity is 0.
+var viscU = null, viscV = null;
+function diffuseVelocities() {
   var k = LIVE.viscosity;
   if (!(k > 0)) return;
-  if (!viscVx || viscVx.length < maxP) {
-    viscVx = new Float32Array(maxP);
-    viscVy = new Float32Array(maxP);
+  if (!viscU || viscU.length !== numCells) {
+    viscU = new Float32Array(numCells);
+    viscV = new Float32Array(numCells);
   }
-
-  // reuse the spatial hash pushParticlesApart already built this frame
-  var reach = minDist * 1.5, reach2 = reach * reach;
-
-  for (var i = 0; i < nP; i++) {
-    var xi = clamp(Math.floor(px[i] * pInvSpacing), 0, pNumX - 1);
-    var yi = clamp(Math.floor(py[i] * pInvSpacing), 0, pNumY - 1);
-    var sx = 0, sy = 0, n = 0;
-
-    for (var dx = -1; dx <= 1; dx++) {
-      var cx = xi + dx;
-      if (cx < 0 || cx >= pNumX) continue;
-      for (var dy = -1; dy <= 1; dy++) {
-        var cy = yi + dy;
-        if (cy < 0 || cy >= pNumY) continue;
-        var cell = cx * pNumY + cy;
-        var f = firstCellParticle[cell], l = firstCellParticle[cell + 1];
-        for (var m = f; m < l; m++) {
-          var id = cellParticleIds[m];
-          if (id === i) continue;
-          var ddx = px[id] - px[i], ddy = py[id] - py[i];
-          if (ddx * ddx + ddy * ddy > reach2) continue;
-          sx += pvx[id]; sy += pvy[id]; n++;
-        }
+  for (var pass = 0; pass < CONFIG.viscIters; pass++) {
+    viscU.set(u); viscV.set(v);
+    for (var i = 1; i < simW - 1; i++) {
+      for (var j = 1; j < simH - 1; j++) {
+        var c = i + j * simW;
+        if (cellType[c] !== FLUID) continue;
+        var l = c - 1, r = c + 1, b = c - simW, t = c + simW;
+        u[c] = viscU[c] + k * ((viscU[l] + viscU[r] + viscU[b] + viscU[t]) * 0.25 - viscU[c]);
+        v[c] = viscV[c] + k * ((viscV[l] + viscV[r] + viscV[b] + viscV[t]) * 0.25 - viscV[c]);
       }
     }
-
-    if (n) {
-      viscVx[i] = pvx[i] + k * (sx / n - pvx[i]);
-      viscVy[i] = pvy[i] + k * (sy / n - pvy[i]);
-    } else {
-      viscVx[i] = pvx[i]; viscVy[i] = pvy[i];
-    }
   }
-
-  for (var p = 0; p < nP; p++) { pvx[p] = viscVx[p]; pvy[p] = viscVy[p]; }
 }
 
 // ---- Gyroscope ----
