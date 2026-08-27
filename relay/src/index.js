@@ -70,7 +70,16 @@ export default {
     if (path === '/touch' && request.method === 'POST') {
       var body = {};
       try { body = await request.json(); } catch (e) {}
+      // 起止坐标和 straight（直线距离/路径长度）是可选的 —— 旧版本的页面
+      // 只发 dist，别把它们当必填。
       var event = { t: Date.now(), dist: +body.dist || 0 };
+      if (body.x0 !== undefined) {
+        event.x0 = clamp01(body.x0); event.y0 = clamp01(body.y0);
+        event.x1 = clamp01(body.x1); event.y1 = clamp01(body.y1);
+      }
+      if (body.straight !== undefined) {
+        event.straight = Math.min(Math.max(+body.straight || 0, 0), 1);
+      }
 
       var hubId = env.TOUCH_HUB.idFromName('singleton');
       var hub = env.TOUCH_HUB.get(hubId);
