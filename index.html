@@ -117,8 +117,10 @@ var LIVE_RANGES = {
   drainSpeed: [0, 2],
   tideAmplitude: [0, 1],   // 弧度，最多约 57°，防止摇摆角度失控
   tidePeriod: [1.5, 120],  // 太短的周期水根本来不及摆动，视觉上只是抖动
-  windMin: [0, 150],
-  windMax: [0, 150],
+  // 允许负数：风力随机游走穿过零点时，风会停一下再从另一边吹起来。
+  // 方向是 gravTan × 带符号的力，雨的生成边按"重力+风"的合向量算，所以会跟着一起翻。
+  windMin: [-150, 150],
+  windMax: [-150, 150],
   windChangeSpeed: [0.02, 10],
 };
 
