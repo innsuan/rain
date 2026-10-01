@@ -844,6 +844,7 @@ function stir(sx, sy, dxPx, dyPx) {
 }
 
 function pointerStart(sx, sy) {
+  if (typeof WATCH !== 'undefined' && WATCH) return;
   pointerDown = true;
   lastPX = sx; lastPY = sy; hasLast = true;
   touchDragDist = 0;
@@ -1397,6 +1398,12 @@ window.liveConfig = {
 
 var RELAY = 'https://rain-relay.innsuanw.workers.dev';
 
+// 旁观模式（10-01，她要的）：网址带 ?watch 时只看不说——
+// 照样拉天气（/control）、照样跟着我划的那一笔（/stir），
+// 但不上报触碰、不交画面、不回应 /capture、不报 /state，手指碰它也不起涟漪。
+// 这样第二块屏（她办公室的小窗）不会和家里那块正式的屏混在一起。
+var WATCH = /[?&]watch(=|&|$)/.test(location.search);
+
 var touchDragDist = 0;
 var touchX0 = 0, touchY0 = 0;   // 这次拖拽的起点（屏幕 px）
 var TOUCH_MIN_DIST = 40;     // px，累计拖拽距离小于这个不算一次触碰
@@ -1413,6 +1420,7 @@ var blendPending = 0;       // frames left to wait before the next exposure
 var blendShot = -1;         // -1 = idle
 
 function uploadFrame() {
+  if (WATCH) return;
   if (blendShot >= 0) return;               // one blend at a time
   if (!blendCanvas) {
     blendCanvas = document.createElement('canvas');
@@ -1452,6 +1460,7 @@ function tickBlend() {
 }
 
 function reportTouchIfReal() {
+  if (WATCH) return;
   if (touchReported || touchDragDist < TOUCH_MIN_DIST) return;
   touchReported = true;
   // 起止用归一化坐标，跟 /stir 同一种格式；straight = 直线距离 / 路径长度，
@@ -1486,6 +1495,7 @@ setInterval(pollControl, 5000);
 // changed, and uploads a canvas snapshot — purely reactive, never spontaneous
 var lastCaptureAt = -1;   // same first-poll rule as /stir below
 function pollCapture() {
+  if (WATCH) return;
   fetch(RELAY + '/capture?t=' + Date.now())
     .then(function (r) { return r.json(); })
     .then(function (data) {
@@ -1558,6 +1568,7 @@ function roughness() {
 // /state — the instrument reading. Numbers only; when I want the picture I
 // ask for a frame and look at it myself.
 function sendState() {
+  if (WATCH) return;
   var live = window.liveConfig.get();
   fetch(RELAY + '/state', {
     method: 'POST',
