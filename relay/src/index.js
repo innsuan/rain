@@ -51,6 +51,17 @@ async function appendCapped(kv, key, item, cap) {
   return list;
 }
 
+
+// 10-02：/poll 合并。页面原来每 5 秒分别 GET /control /capture /stir —— 三个请求、三次 KV 读。
+// 现在三样同时写进一个 'live' 键，页面一次 GET /poll 一次读就够了。旧的三个 GET 留着，
+// 没刷新的页面照常工作。写只发生在我这边（改天气、划一笔、要截图），很少。
+async function updateLive(env, patch) {
+  var raw = await env.RAIN_KV.get('live');
+  var live = raw ? JSON.parse(raw) : {};
+  for (var k in patch) live[k] = patch[k];
+  await env.RAIN_KV.put('live', JSON.stringify(live));
+}
+
 export default {
   async fetch(request, env, ctx) {
     var url = new URL(request.url);
@@ -100,6 +111,17 @@ export default {
       return json(raw ? JSON.parse(raw) : []);
     }
 
+    // ---- poll: control + stir + captureAt in one read ----
+    if (path === '/poll' && request.method === 'GET') {
+      var rawLive = await env.RAIN_KV.get('live');
+      if (rawLive) return json(JSON.parse(rawLive));
+      // 第一次：从三个旧键拼出来存一份
+      var c0 = await env.RAIN_KV.get('control'), s0 = await env.RAIN_KV.get('stir'), a0 = await env.RAIN_KV.get('captureAt');
+      var live0 = { control: c0 ? JSON.parse(c0) : {}, stir: s0 ? JSON.parse(s0) : { at: 0 }, captureAt: a0 ? +a0 : 0 };
+      await env.RAIN_KV.put('live', JSON.stringify(live0));
+      return json(live0);
+    }
+
     // ---- control (animation params) ----
     if (path === '/control' && request.method === 'GET') {
       var raw2 = await env.RAIN_KV.get('control');
@@ -113,6 +135,7 @@ export default {
       var body2 = {};
       try { body2 = await request.json(); } catch (e) {}
       await env.RAIN_KV.put('control', JSON.stringify(body2));
+      await updateLive(env, { control: body2 });
       return json({ ok: true });
     }
 
@@ -149,6 +172,7 @@ export default {
         steps: Math.min(Math.max(+st.steps || 12, 1), 60),
       };
       await env.RAIN_KV.put('stir', JSON.stringify(stroke));
+      await updateLive(env, { stir: stroke });
       return json({ ok: true });
     }
 
@@ -162,7 +186,9 @@ export default {
       if (request.headers.get('X-Auth') !== env.CONTROL_SECRET) {
         return json({ ok: false, error: 'unauthorized' }, 401);
       }
-      await env.RAIN_KV.put('captureAt', String(Date.now()));
+      var nowAt = Date.now();
+      await env.RAIN_KV.put('captureAt', String(nowAt));
+      await updateLive(env, { captureAt: nowAt });
       return json({ ok: true });
     }
 

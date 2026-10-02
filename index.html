@@ -1481,33 +1481,21 @@ function reportTouchIfReal() {
   setTimeout(uploadFrame, 500);
 }
 
-function pollControl() {
-  fetch(RELAY + '/control?t=' + Date.now())
-    .then(function (r) { return r.json(); })
-    .then(function (data) {
-      if (data && Object.keys(data).length) window.liveConfig.setMany(data);
-    })
-    .catch(function () {});
+function applyControl(data) {
+  if (data && Object.keys(data).length) window.liveConfig.setMany(data);
 }
-setInterval(pollControl, 5000);
 
 // capture: I remotely POST /capture, the page polls, notices the timestamp
 // changed, and uploads a canvas snapshot — purely reactive, never spontaneous
 var lastCaptureAt = -1;   // same first-poll rule as /stir below
-function pollCapture() {
+function applyCapture(at) {
   if (WATCH) return;
-  fetch(RELAY + '/capture?t=' + Date.now())
-    .then(function (r) { return r.json(); })
-    .then(function (data) {
-      if (!data || !data.at || data.at === lastCaptureAt) return;
-      var firstPoll = lastCaptureAt === -1;
-      lastCaptureAt = data.at;
-      if (firstPoll) return;
-      uploadFrame();
-    })
-    .catch(function () {});
+  if (!at || at === lastCaptureAt) return;
+  var firstPoll = lastCaptureAt === -1;
+  lastCaptureAt = at;
+  if (firstPoll) return;
+  uploadFrame();
 }
-setInterval(pollCapture, 5000);
 
 // stir: the other direction of a touch. I POST a stroke, the page notices the
 // timestamp changed and draws it across the water over a few frames — the same
@@ -1518,10 +1506,7 @@ setInterval(pollCapture, 5000);
 var lastStirAt = -1;
 var stirQueue = null;   // {x0,y0,x1,y1,steps,i} in screen px
 
-function pollStir() {
-  fetch(RELAY + '/stir?t=' + Date.now())
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
+function applyStir(d) {
       if (!d || !d.at || d.at === lastStirAt) return;
       var firstPoll = lastStirAt === -1;
       lastStirAt = d.at;
@@ -1530,10 +1515,28 @@ function pollStir() {
       var x0 = (d.x0 != null ? d.x0 : 0.5) * W, y0 = (d.y0 != null ? d.y0 : 0.5) * H;
       var x1 = (d.x1 != null ? d.x1 : 0.5) * W, y1 = (d.y1 != null ? d.y1 : 0.5) * H;
       stirQueue = { x0: x0, y0: y0, x1: x1, y1: y1, steps: d.steps || 12, i: 0 };
+}
+
+// 10-02：三个轮询并成一个 /poll（一次请求、relay 那边一次 KV 读）。
+// 旁观窗问得慢一些（20 秒），标签页看不见的时候不问——Cloudflare 免费额度一天 10 万次请求。
+var POLL_MS = WATCH ? 20000 : 5000;
+function pollAll() {
+  if (WATCH && document.visibilityState === 'hidden') return;
+  fetch(RELAY + '/poll?t=' + Date.now())
+    .then(function (r) { return r.json(); })
+    .then(function (live) {
+      if (!live) return;
+      applyControl(live.control);
+      applyCapture(live.captureAt);
+      applyStir(live.stir);
     })
     .catch(function () {});
 }
-setInterval(pollStir, 5000);
+pollAll();
+setInterval(pollAll, POLL_MS);
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible') pollAll();
+});
 
 // called once per rendered frame from loop()
 function tickStir() {
